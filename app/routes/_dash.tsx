@@ -10,6 +10,7 @@ import {
 	WashingMachine,
 	BarChart2,
 	File,
+	Video,
 } from "lucide-react";
 import { Outlet, redirect } from "@remix-run/react";
 import { SignOutButton } from "@clerk/remix";
@@ -36,6 +37,7 @@ export default function Dashboard() {
 		{ name: "Generate", href: "/dashboard", icon: WashingMachine },
 		{ name: "Analyze", href: "/dashboard/analyze", icon: BarChart3 },
 		{ name: "Scrape", href: "/dashboard/scrape", icon: Pickaxe },
+		{ name: "Yolo Training", href: "/dashboard/yolo", icon: Video },
 		{ name: "Stock LLM", href: "/dashboard/stockllm", icon: BarChart2 },
 	];
 
@@ -71,7 +73,7 @@ export default function Dashboard() {
 					</button>
 				</div>
 
-				<nav className="flex-1 px-3 py-6 overflow-y-auto">
+				<nav className="flex-1 px-3 py-6 overflow-y-auto max-h-[83vh]">
 					<div className="space-y-1">
 						{navigation.map((item) => {
 							const isCurrent = currentPath === item.href;

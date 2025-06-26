@@ -21,7 +21,7 @@ interface HuggingFaceResponse {
 
 async function generateAITabularData(
 	commands: string[],
-	numItems: number
+	numItems: number = 50
 ): Promise<any[][]> {
 	const columnDescriptions = commands
 		.map((command, i) => `${i + 1}. ${command}`)
@@ -51,7 +51,6 @@ For example:
 			", "
 		)}`
 	);
-	console.log("This may take a moment...");
 
 	try {
 		// Call the Hugging Face Inference API for chat completions

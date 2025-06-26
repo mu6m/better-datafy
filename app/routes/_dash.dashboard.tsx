@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { X, Plus, Download } from "lucide-react";
-import { Form, useLoaderData, useNavigation } from "@remix-run/react";
+import {
+	Form,
+	useLoaderData,
+	useNavigation,
+	useRevalidator,
+} from "@remix-run/react";
 import {
 	json,
 	redirect,
@@ -150,6 +155,16 @@ export async function action(args: ActionFunctionArgs) {
 }
 
 export default function GenerationDashboard() {
+	const revalidator = useRevalidator();
+
+	useEffect(() => {
+		const interval = setInterval(() => {
+			revalidator.revalidate();
+		}, 5000);
+
+		return () => clearInterval(interval);
+	}, []);
+
 	const { generations } = useLoaderData<typeof loader>();
 	const [showCreateModal, setShowCreateModal] = useState(false);
 	const navigation = useNavigation();
