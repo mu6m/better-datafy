@@ -1,10 +1,12 @@
 import { inngest } from "./client";
+import { db } from "~/db/db.server"; // Adjust the import path to your database instance
+import { generations } from "~/db/schema"; // Adjust the import path to your schema
+import { eq } from "drizzle-orm";
 
 // Interface for the event payload received by the Inngest function
 interface GenerateDataEvent {
 	data: {
-		llm_commands: string[]; // Array of commands (column descriptions) for the AI
-		num_items: number; // Number of rows to generate
+		generationId: string; // UUID of the generation record
 	};
 }
 
@@ -17,27 +19,14 @@ interface HuggingFaceResponse {
 	}>;
 }
 
-/**
- * Generates tabular data using an AI model (Hugging Face Mixtral-8x7B-Instruct-v0.1).
- * The AI generates a JSON array of arrays based on provided commands and desired number of items.
- *
- * @param commands An array of strings, where each string describes a column for the data.
- * @param numItems The desired number of rows to generate.
- * @returns A Promise that resolves to a 2D array (table) of generated data,
- * or an error message within a 2D array if generation fails.
- */
 async function generateAITabularData(
 	commands: string[],
 	numItems: number
 ): Promise<any[][]> {
-	// Create a numbered list of column descriptions for the AI prompt
 	const columnDescriptions = commands
 		.map((command, i) => `${i + 1}. ${command}`)
 		.join("\n");
 
-	// Construct a detailed prompt for the AI to ensure it returns the correct format.
-	// The prompt is made more explicit about the expected JSON array of arrays format,
-	// especially for single-command scenarios, to prevent the AI from generating extra data.
 	const fullPrompt = `
 You are a data generation assistant. Your task is to generate a JSON array of arrays, representing tabular data, based on a user's request.
 
@@ -131,29 +120,134 @@ export const generateAIData = inngest.createFunction(
 	{ event: "ai/generate.tabular.data" }, // Event trigger for this function
 	// Asynchronous handler function for the Inngest event
 	async ({ event, step }: { event: GenerateDataEvent; step: any }) => {
-		// Destructure relevant data from the event payload
-		const { llm_commands: commands, num_items: numberOfItems } = event.data;
+		const { generationId } = event.data;
 
-		// Validate if commands are provided and not empty
-		if (!commands || commands.length === 0) {
+		try {
+			// Step 1: Fetch generation data from database
+			const generationRecord = await step.run(
+				"fetch-generation-data",
+				async () => {
+					const result = await db
+						.select()
+						.from(generations)
+						.where(eq(generations.id, generationId))
+						.limit(1);
+
+					if (result.length === 0) {
+						throw new Error(`Generation with ID ${generationId} not found`);
+					}
+
+					return result[0];
+				}
+			);
+
+			// Extract data from the generation record
+			const { len: numberOfItems, data: generationData } = generationRecord;
+			const { llm_commands } = generationData as { llm_commands: string[] };
+
+			// Validate if commands are provided and not empty
+			if (!llm_commands || llm_commands.length === 0) {
+				throw new Error(
+					"'llm_commands' not found in generation data or is empty"
+				);
+			}
+
+			if (!numberOfItems || numberOfItems <= 0) {
+				throw new Error("'len' not found in generation data or is invalid");
+			}
+
+			// Step 2: Generate mock data using the AI model
+			const mockData = await step.run("generate-tabular-data", async () => {
+				return await generateAITabularData(llm_commands, numberOfItems);
+			});
+
+			// Check if generation was successful (no error data)
+			const hasError =
+				mockData.length > 0 &&
+				mockData[0].length === 2 &&
+				mockData[0][0] === "Error";
+
+			if (hasError) {
+				// Step 3a: Update database status to error
+				await step.run("update-status-error", async () => {
+					await db
+						.update(generations)
+						.set({
+							status: "error",
+							data: {
+								...generationData,
+								error: mockData[0][1], // Store the error message
+							},
+						})
+						.where(eq(generations.id, generationId));
+				});
+
+				return {
+					error: mockData[0][1],
+					generationId,
+					status: "error",
+				};
+			} else {
+				// Step 3b: Update database with generated data and set status to finished
+				await step.run("update-status-finished", async () => {
+					// Convert array of arrays to array of objects for storage
+					const rows = mockData.map((row) => {
+						const obj: Record<string, any> = {};
+						llm_commands.forEach((command, index) => {
+							obj[command] = row[index] || null;
+						});
+						return obj;
+					});
+
+					await db
+						.update(generations)
+						.set({
+							status: "finished",
+							data: {
+								columns: llm_commands,
+								llm_commands: llm_commands,
+								rows: rows,
+							},
+						})
+						.where(eq(generations.id, generationId));
+				});
+
+				return {
+					message: `Successfully generated ${mockData.length} rows of data`,
+					generationId,
+					status: "finished",
+					rowCount: mockData.length,
+				};
+			}
+		} catch (error) {
+			// Handle any errors that occur during the process
+			await step.run("update-status-error-catch", async () => {
+				try {
+					await db
+						.update(generations)
+						.set({
+							status: "error",
+							data: {
+								columns: [],
+								llm_commands: [],
+								rows: [],
+								error: error instanceof Error ? error.message : String(error),
+							},
+						})
+						.where(eq(generations.id, generationId));
+				} catch (dbError) {
+					console.error(
+						"Failed to update database with error status:",
+						dbError
+					);
+				}
+			});
+
 			return {
-				error: "Error: 'llm_commands' key not found in input or is empty.",
-				data: null,
+				error: error instanceof Error ? error.message : String(error),
+				generationId,
+				status: "error",
 			};
 		}
-
-		// Generate mock data using the AI model within an Inngest step.
-		// `step.run` ensures this operation is trackable and retriable within Inngest.
-		const mockData = await step.run("generate-tabular-data", async () => {
-			return await generateAITabularData(commands, numberOfItems);
-		});
-
-		// Return the result, including metadata, for the event consumer
-		return {
-			message: `Successfully generated ${mockData.length} rows of data`,
-			data: mockData, // The generated tabular data
-			columns: commands, // The original commands (column descriptions)
-			rowCount: mockData.length, // The number of generated rows
-		};
 	}
 );

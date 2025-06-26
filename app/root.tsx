@@ -8,12 +8,14 @@ import {
 	ScrollRestoration,
 } from "@remix-run/react";
 
-import { rootAuthLoader } from "@clerk/remix/ssr.server";
+import { getAuth, rootAuthLoader } from "@clerk/remix/ssr.server";
 import { ClerkApp } from "@clerk/remix";
 import { title } from "./config";
 import type { LinksFunction } from "@remix-run/node";
 import stylesheet from "~/tailwind.css?url";
-import Nav from "./component/Nav";
+import { db } from "./db/db.server";
+import { users } from "./db/schema";
+import { eq } from "drizzle-orm";
 
 export const links: LinksFunction = () => [
 	{ rel: "stylesheet", href: stylesheet },
@@ -24,7 +26,26 @@ export const meta: MetaFunction = () => [
 	},
 ];
 
-export const loader: LoaderFunction = (args) => rootAuthLoader(args);
+export const loader: LoaderFunction = async (args) => {
+	const authData = await rootAuthLoader(args);
+	const { userId } = await getAuth(args);
+
+	if (userId) {
+		try {
+			const existingUser = await db
+				.select()
+				.from(users)
+				.where(eq(users.id, userId));
+			if (existingUser.length === 0) {
+				await db.insert(users).values({ id: userId });
+			}
+		} catch (error) {
+			console.error("Database error:", error);
+		}
+	}
+
+	return rootAuthLoader(args);
+};
 
 export function Layout({ children }: { children: React.ReactNode }) {
 	return (

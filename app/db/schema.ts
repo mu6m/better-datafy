@@ -6,6 +6,7 @@ import {
 	jsonb,
 	integer,
 	pgEnum,
+	uuid,
 } from "drizzle-orm/pg-core";
 
 export const statusEnum = pgEnum("status", ["error", "running", "finished"]);
@@ -13,11 +14,10 @@ export const statusEnum = pgEnum("status", ["error", "running", "finished"]);
 export const users = pgTable("users", {
 	id: text("id").primaryKey(),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
-	updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 export const generations = pgTable("generations", {
-	id: text("id").primaryKey(),
+	id: uuid("id").defaultRandom().primaryKey(),
 	userId: text("user_id")
 		.notNull()
 		.references(() => users.id, { onDelete: "cascade" }),
