@@ -8,10 +8,12 @@ import {
 	Github,
 	Star,
 } from "lucide-react";
+import { SignInButton, useUser } from "@clerk/remix";
 
 export default function DatafyHero() {
 	const [isVisible, setIsVisible] = useState(false);
 	const [currentWord, setCurrentWord] = useState(0);
+	const { isSignedIn, user } = useUser();
 
 	const words = ["Generate", "Analyze", "Scrape"];
 
@@ -24,21 +26,21 @@ export default function DatafyHero() {
 	}, []);
 
 	return (
-		<div className="bg-blue-500 relative min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 overflow-hidden">
+		<div className="px-4 py-8">
 			{/* Animated background elements */}
-			<div className="absolute inset-0">
+			<div className="absolute z-[-10px]">
 				<div className="absolute top-20 left-20 w-72 h-72 bg-purple-500/20 rounded-full blur-3xl animate-pulse"></div>
 				<div className="absolute bottom-20 right-20 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl animate-pulse delay-1000"></div>
 				<div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-cyan-500/10 rounded-full blur-3xl animate-pulse delay-2000"></div>
 			</div>
 
 			{/* Grid pattern overlay */}
-			<div className="absolute inset-0 opacity-40">
+			<div className="absolute z-[-10px] opacity-40">
 				<div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent"></div>
 				<div className="absolute inset-0 bg-gradient-to-b from-transparent via-white/5 to-transparent"></div>
 			</div>
 
-			<div className="relative z-10 flex flex-col items-center justify-center min-h-screen px-4 sm:px-6 lg:px-8">
+			<div className="flex flex-col items-center justify-center min-h-screen px-4 sm:px-6 lg:px-8">
 				<div className="text-center max-w-5xl mx-auto">
 					{/* Logo/Brand */}
 					<div
@@ -95,8 +97,8 @@ export default function DatafyHero() {
 						}`}
 					>
 						<p className="text-xl sm:text-2xl text-gray-300 mb-4 max-w-3xl mx-auto leading-relaxed">
-							Free & Open Source SaaS platform that empowers you to generate,
-							analyze, and scrape data with cutting-edge AI technology
+							Free & Open Source SaaS platform that allows you to generate,
+							analyze, and scrape data using AI
 						</p>
 						<div className="flex items-center justify-center gap-2 text-sm text-gray-400 mb-12">
 							<Github className="w-4 h-4" />
@@ -119,21 +121,39 @@ export default function DatafyHero() {
 						}`}
 					>
 						<div className="flex flex-col sm:flex-row gap-4 justify-center items-center mb-16">
-							<button className="group relative px-8 py-4 bg-gradient-to-r from-purple-500 via-blue-500 to-cyan-500 text-white font-semibold rounded-2xl shadow-2xl hover:shadow-purple-500/25 transition-all duration-300 hover:scale-105 hover:-translate-y-1">
-								<span className="flex items-center gap-2">
-									Get Started Free
-									<ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-								</span>
-								<div className="absolute inset-0 bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 -z-10"></div>
-							</button>
+							{!isSignedIn ? (
+								<SignInButton mode="modal">
+									<button className="group relative px-8 py-4 bg-gradient-to-r from-purple-500 via-blue-500 to-cyan-500 text-white font-semibold rounded-2xl shadow-2xl hover:shadow-purple-500/25 transition-all duration-300 hover:scale-105 hover:-translate-y-1">
+										<span className="flex items-center gap-2">
+											Get Started Free
+											<ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+										</span>
+										<div className="absolute inset-0 bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 -z-10"></div>
+									</button>
+								</SignInButton>
+							) : (
+								<a
+									href="/dashboard"
+									className="group relative px-8 py-4 bg-gradient-to-r from-purple-500 via-blue-500 to-cyan-500 text-white font-semibold rounded-2xl shadow-2xl hover:shadow-purple-500/25 transition-all duration-300 hover:scale-105 hover:-translate-y-1"
+								>
+									<span className="flex items-center gap-2">
+										Go to Dashboard
+										<ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+									</span>
+									<div className="absolute inset-0 bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300 -z-10"></div>
+								</a>
+							)}
 
-							<button className="group relative px-8 py-4 border-2 border-gray-600 text-white font-semibold rounded-2xl hover:border-purple-400 transition-all duration-300 hover:scale-105 hover:-translate-y-1 backdrop-blur-sm">
+							<a
+								href="https://github.com/mu6m/better-datafy"
+								className="group relative px-8 py-4 border-2 border-gray-600 text-white font-semibold rounded-2xl hover:border-purple-400 transition-all duration-300 hover:scale-105 hover:-translate-y-1 backdrop-blur-sm"
+							>
 								<span className="flex items-center gap-2">
 									<Github className="w-5 h-5" />
 									View on GitHub
 								</span>
 								<div className="absolute inset-0 bg-gradient-to-r from-purple-500/10 via-blue-500/10 to-cyan-500/10 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
-							</button>
+							</a>
 						</div>
 					</div>
 
@@ -147,39 +167,39 @@ export default function DatafyHero() {
 					>
 						<div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto">
 							<div className="group p-6 bg-white/5 backdrop-blur-lg rounded-2xl border border-white/10 hover:border-purple-400/50 transition-all duration-300 hover:scale-105 hover:-translate-y-2">
-								<div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-blue-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+								<div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-blue-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform mx-auto">
 									<Database className="w-6 h-6 text-white" />
 								</div>
 								<h3 className="text-xl font-semibold text-white mb-2">
 									Generate Data
 								</h3>
 								<p className="text-gray-300">
-									Create synthetic datasets with AI-powered generation
-									algorithms
+									Create synthetic datasets with AI
 								</p>
 							</div>
 
 							<div className="group p-6 bg-white/5 backdrop-blur-lg rounded-2xl border border-white/10 hover:border-blue-400/50 transition-all duration-300 hover:scale-105 hover:-translate-y-2">
-								<div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+								<div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform mx-auto">
 									<Brain className="w-6 h-6 text-white" />
 								</div>
 								<h3 className="text-xl font-semibold text-white mb-2">
 									Analyze Insights
 								</h3>
 								<p className="text-gray-300">
-									Discover patterns and insights with advanced AI analytics
+									Analyze large content videos, texts, etc... and generate
+									context about it{" "}
 								</p>
 							</div>
 
 							<div className="group p-6 bg-white/5 backdrop-blur-lg rounded-2xl border border-white/10 hover:border-cyan-400/50 transition-all duration-300 hover:scale-105 hover:-translate-y-2">
-								<div className="w-12 h-12 bg-gradient-to-br from-cyan-500 to-teal-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+								<div className="w-12 h-12 bg-gradient-to-br from-cyan-500 to-teal-500 rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform mx-auto">
 									<Globe className="w-6 h-6 text-white" />
 								</div>
 								<h3 className="text-xl font-semibold text-white mb-2">
 									Scrape Web Data
 								</h3>
 								<p className="text-gray-300">
-									Extract data from websites with intelligent scraping tools
+									Extract data from websites using LLM
 								</p>
 							</div>
 						</div>

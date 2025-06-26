@@ -1,13 +1,13 @@
-import { SignInButton, useUser } from "@clerk/remix";
+import { SignInButton, SignOutButton, useUser } from "@clerk/remix";
 
 export default function Navbar() {
 	const { isSignedIn, user } = useUser();
 
 	return (
-		<nav className="flex flex-col md:flex-row w-full justify-center content-center max-w-6xl mx-auto px-4 items-center my-8 gap-4">
+		<nav className="flex flex-row w-full justify-center content-center max-w-6xl mx-auto px-4 items-center my-8 gap-4">
 			<div className="w-full flex gap-4 items-center sm:justify-start">
 				<div>
-					<a href="/" className="text-xl font-bold">
+					<a href="/" className="text-xl text-white font-bold">
 						Datafy
 					</a>
 				</div>
@@ -18,21 +18,24 @@ export default function Navbar() {
 			<div className="flex items-center space-x-4">
 				{!isSignedIn ? (
 					<SignInButton mode="modal">
-						<button className="bg-blue-500 hover:bg-blue-600 whitespace-nowrap text-white px-2 py-1 rounded-sm">
+						<button className="bg-blue-500 hover:bg-blue-800 whitespace-nowrap text-white px-2 py-1 rounded-sm cursor-pointer">
 							login
 						</button>
 					</SignInButton>
 				) : (
-					<div className="flex items-center space-x-4 gap-4 whitespace-nowrap">
-						<div className="flex flex-col md:flex-row gap-4">
-							<a
-								href="/user/"
-								className="bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded-sm"
-							>
-								account
-							</a>
-						</div>
-					</div>
+					<>
+						<a
+							href="/dashboard/"
+							className="bg-blue-500 hover:bg-blue-600 text-white px-2 py-1 rounded-sm cursor-pointer"
+						>
+							account
+						</a>
+						<SignOutButton>
+							<button className="bg-red-500 hover:bg-red-600 text-white px-2 py-1 rounded-sm cursor-pointer">
+								logout
+							</button>
+						</SignOutButton>
+					</>
 				)}
 			</div>
 		</nav>

@@ -1,5 +1,5 @@
 import { db } from "~/db/db.server";
-import { products } from "~/db/schema";
+// import { products } from "~/db/schema";
 import { sql } from "drizzle-orm";
 
 export const ITEMS_PER_PAGE = 12;

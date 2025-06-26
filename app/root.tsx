@@ -47,7 +47,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
 function App() {
 	return (
 		<main>
-			<Nav />
 			<Outlet />
 		</main>
 	);

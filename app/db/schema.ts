@@ -1,5 +1,14 @@
 import { relations, sql } from "drizzle-orm";
-import { pgTable, text, timestamp, jsonb } from "drizzle-orm/pg-core";
+import {
+	pgTable,
+	text,
+	timestamp,
+	jsonb,
+	integer,
+	pgEnum,
+} from "drizzle-orm/pg-core";
+
+export const statusEnum = pgEnum("status", ["error", "running", "finished"]);
 
 export const users = pgTable("users", {
 	id: text("id").primaryKey(),
@@ -13,11 +22,12 @@ export const generations = pgTable("generations", {
 		.notNull()
 		.references(() => users.id, { onDelete: "cascade" }),
 	name: text("name"),
+	len: integer("len"),
+	status: statusEnum("status").notNull().default("running"),
 	data: jsonb("data")
 		.notNull()
 		.default('{"columns": [], "llm_commands": [], "rows": []}'),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
-	updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -32,7 +42,9 @@ export const generationsRelations = relations(generations, ({ one }) => ({
 }));
 
 export type GenerationData = {
-	columns: string[]; // Array of column names (1-10 columns)
-	llm_commands: string[]; // Array of LLM commands corresponding to each column
-	rows: Record<string, any>[]; // Array of row objects
+	columns: string[];
+	llm_commands: string[];
+	rows: Record<string, any>[];
 };
+
+export type GenerationStatus = "error" | "running" | "finished";

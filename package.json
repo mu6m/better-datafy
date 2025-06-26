@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@clerk/remix": "^4.8.1",
+    "@inngest/sdk": "jsr:^3.39.2",
     "@remix-run/node": "^2.16.8",
     "@remix-run/react": "^2.16.8",
     "@remix-run/serve": "^2.16.8",
@@ -38,6 +39,7 @@
     "eslint-plugin-jsx-a11y": "^6.7.1",
     "eslint-plugin-react": "^7.33.2",
     "eslint-plugin-react-hooks": "^4.6.0",
+    "inngest": "^3.39.2",
     "lucide-react": "^0.522.0",
     "postcss": "^8.4.38",
     "postgres": "^3.4.7",
