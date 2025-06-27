@@ -12,6 +12,7 @@ import {
 	Rss,
 	File,
 	Video,
+	Youtube,
 } from "lucide-react";
 import { Outlet, redirect, useLocation } from "@remix-run/react";
 import { SignOutButton } from "@clerk/remix";
@@ -37,8 +38,13 @@ export default function Dashboard() {
 		{ name: "Analyze", href: "/dashboard/analyze", icon: BarChart3 },
 		{ name: "Scrape", href: "/dashboard/scrape", icon: Pickaxe },
 		{ name: "Rss Feed AI", href: "/dashboard/rss", icon: Rss },
-		{ name: "Yolo Training", href: "/dashboard/yolo", icon: Video },
-		{ name: "Stock LLM", href: "/dashboard/stockllm", icon: BarChart2 },
+		// { name: "Yolo Training", href: "/dashboard/yolo", icon: Video },
+		// { name: "Stock LLM", href: "/dashboard/stockllm", icon: BarChart2 },
+		// {
+		// 	name: "Summarize Youtube Video",
+		// 	href: "/dashboard/youtube",
+		// 	icon: Youtube,
+		// },
 	];
 
 	return (

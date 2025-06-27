@@ -1,252 +1,203 @@
 import { inngest } from "./client";
-import { db } from "~/db/db.server"; // Adjust the import path to your database instance
-import { generations } from "~/db/schema"; // Adjust the import path to your schema
-import { eq } from "drizzle-orm";
+import { Pinecone } from "@pinecone-database/pinecone";
+import { InferenceClient } from "@huggingface/inference";
+import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 
-// Interface for the event payload received by the Inngest function
-interface GenerateDataEvent {
+interface ContentItem {
+	type: "link" | "text";
+	text: string;
+}
+
+interface RAGEvent {
 	data: {
-		generationId: string; // UUID of the generation record
+		sessionId: string;
+		contentItems: ContentItem[];
+		question?: string;
+		mode: "upload" | "query";
 	};
 }
 
-// Interface for the expected response structure from the Hugging Face API
-interface HuggingFaceResponse {
+interface MistralResponse {
 	choices: Array<{
 		message: {
-			content: string; // The AI's generated content (JSON string)
+			content: string;
 		};
 	}>;
 }
 
-async function generateAITabularData(
-	commands: string[],
-	numItems: number = 50
-): Promise<any[][]> {
-	const columnDescriptions = commands
-		.map((command, i) => `${i + 1}. ${command}`)
-		.join("\n");
+const pinecone = new Pinecone();
+const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
+const indexName = "datafy";
 
-	const fullPrompt = `
-You are a data generation assistant. Your task is to generate a JSON array of arrays, representing tabular data, based on a user's request.
+// --- Model Configuration ---
+// Using a model with a larger dimension. Ensure this matches your index.
+// You can find more models at https://huggingface.co/models?pipeline_tag=feature-extraction
+const embeddingModel = "BAAI/bge-large-en-v1.5";
+const embeddingDimension = 1024; // The dimension of the bge-large-en-v1.5 model
 
-User Request: Generate ${numItems} rows of data with the following columns:
-${columnDescriptions}
-
-IMPORTANT: Your response must ONLY be the raw JSON array of arrays. Do not include any other text, explanations, or markdown formatting.
-Each inner array should represent one row of data.
-The number of elements in each inner array must exactly match the number of column descriptions provided.
-Each value in an inner array must correspond directly to its respective column description.
-
-For example:
-- If the request is for 3 items with columns "City", the output should be like this:
-  [["Paris"], ["Tokyo"], ["New York"]]
-
-- If the request is for 2 items with columns "City" and "Country", the output should be like this:
-  [["London", "UK"], ["Berlin", "Germany"]]
-`;
-
-	console.log(
-		`Sending request to AI model for ${numItems} rows with columns: ${commands.join(
-			", "
-		)}`
-	);
-
+async function fetchUrlContent(url: string): Promise<string> {
 	try {
-		// Call the Hugging Face Inference API for chat completions
-		const response = await fetch(
-			"https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1/v1/chat/completions",
-			{
-				method: "POST",
-				headers: {
-					// Authorization header with API key from environment variables
-					Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					// Messages array for the chat completion API (user role only for this task)
-					messages: [{ role: "user", content: fullPrompt }],
-					max_tokens: 1_000_000, // Maximum tokens for the AI's response
-					temperature: 0.8, // Creativity/randomness of the AI's response
-				}),
-			}
-		);
-
-		// Check if the HTTP response was successful
+		const fullUrl = url.startsWith("http") ? url : `https://${url}`;
+		const response = await fetch(fullUrl);
 		if (!response.ok) {
-			throw new Error(`HTTP error! status: ${response.status}`);
+			return `Failed to fetch ${fullUrl}`;
 		}
-
-		// Parse the JSON response from the Hugging Face API
-		const responseData: HuggingFaceResponse = await response.json();
-		// Extract the generated text content from the AI's response
-		const generatedText = responseData.choices[0].message.content;
-
-		// Clean the generated text: remove markdown code blocks if present
-		const cleanedText = generatedText
-			.trim() // Remove leading/trailing whitespace
-			.replace(/```json/g, "") // Remove '```json'
-			.replace(/```/g, "") // Remove '```'
-			.trim(); // Trim again after replacements
-
-		// Parse the cleaned JSON string into a JavaScript array
-		const data = JSON.parse(cleanedText);
-
-		// Basic validation: Check if the parsed data is an array of arrays
-		if (
-			!Array.isArray(data) || // Must be an array
-			(data.length > 0 && !data.every((row) => Array.isArray(row))) // If not empty, all elements must be arrays
-		) {
-			throw new Error(
-				"Generated data is not in the expected list of lists format."
-			);
-		}
-
-		console.log(`Successfully generated ${data.length} rows.`);
-		return data;
+		const html = await response.text();
+		return html
+			.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+			.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+			.replace(/<[^>]*>/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
 	} catch (error) {
-		console.error(
-			`An error occurred during AI data generation or parsing: ${error}`
-		);
-		// Return a structured error message within a 2D array for consistent client-side handling
-		return [["Error", `Failed to generate or parse data. Details: ${error}`]];
+		return `Error fetching content from ${url} please note this when the user asks you anything about it`;
 	}
 }
 
-// Inngest function definition to expose the data generation as an event-driven task
-export const analyzeAIData = inngest.createFunction(
-	{ id: "analyze-ai-data" }, // Unique ID for the Inngest function
-	{ event: "ai/analyze.tabular.data" }, // Event trigger for this function
-	// Asynchronous handler function for the Inngest event
-	async ({ event, step }: { event: GenerateDataEvent; step: any }) => {
-		const { generationId } = event.data;
+async function initializeIndex() {
+	const existingIndexes = await pinecone.listIndexes();
+	if (!existingIndexes.indexes?.some((index) => index.name === indexName)) {
+		await pinecone.createIndex({
+			name: indexName,
+			dimension: embeddingDimension, // *** FIX: Use the correct dimension for your chosen model ***
+			metric: "cosine",
+			spec: {
+				serverless: {
+					cloud: "aws",
+					region: "us-east-1",
+				},
+			},
+			waitUntilReady: true,
+		});
+	}
+}
 
-		try {
-			// Step 1: Fetch generation data from database
-			const generationRecord = await step.run(
-				"fetch-generation-data",
-				async () => {
-					const result = await db
-						.select()
-						.from(generations)
-						.where(eq(generations.id, generationId))
-						.limit(1);
+/**
+ * NEW: A function to split large text into smaller chunks.
+ * This is crucial for handling large documents and staying within model context limits.
+ */
+async function chunkText(text: string): Promise<string[]> {
+	const splitter = new RecursiveCharacterTextSplitter({
+		chunkSize: 1000, // The maximum size of each chunk
+		chunkOverlap: 100, // The number of characters to overlap between chunks
+	});
 
-					if (result.length === 0) {
-						throw new Error(`Generation with ID ${generationId} not found`);
-					}
+	const chunks = await splitter.splitText(text);
+	return chunks;
+}
 
-					return result[0];
-				}
-			);
+async function uploadContent(sessionId: string, contentItems: ContentItem[]) {
+	await initializeIndex();
+	const index = pinecone.index(indexName).namespace(sessionId);
+	const batchSize = 100; // Pinecone recommends upserting in batches of 100 or fewer
 
-			// Extract data from the generation record
-			const { len: numberOfItems, data: generationData } = generationRecord;
-			const { llm_commands } = generationData as { llm_commands: string[] };
+	for (const item of contentItems) {
+		const content =
+			item.type === "link" ? await fetchUrlContent(item.text) : item.text;
 
-			// Validate if commands are provided and not empty
-			if (!llm_commands || llm_commands.length === 0) {
-				throw new Error(
-					"'llm_commands' not found in generation data or is empty"
-				);
-			}
+		// *** NEW: Chunk the content before embedding ***
+		const contentChunks = await chunkText(content);
 
-			if (!numberOfItems || numberOfItems <= 0) {
-				throw new Error("'len' not found in generation data or is invalid");
-			}
-
-			// Step 2: Generate mock data using the AI model
-			const mockData = await step.run("generate-tabular-data", async () => {
-				return await generateAITabularData(llm_commands, numberOfItems);
+		const vectors = [];
+		for (const [i, chunk] of contentChunks.entries()) {
+			const embedding = await hf.featureExtraction({
+				model: embeddingModel,
+				inputs: chunk,
 			});
 
-			// Check if generation was successful (no error data)
-			const hasError =
-				mockData.length > 0 &&
-				mockData[0].length === 2 &&
-				mockData[0][0] === "Error";
-
-			if (hasError) {
-				// Step 3a: Update database status to error
-				await step.run("update-status-error", async () => {
-					await db
-						.update(generations)
-						.set({
-							status: "error",
-							data: {
-								...generationData,
-								error: mockData[0][1], // Store the error message
-							},
-						})
-						.where(eq(generations.id, generationId));
-				});
-
-				return {
-					error: mockData[0][1],
-					generationId,
-					status: "error",
-				};
-			} else {
-				// Step 3b: Update database with generated data and set status to finished
-				await step.run("update-status-finished", async () => {
-					// Convert array of arrays to array of objects for storage
-					const rows = mockData.map((row) => {
-						const obj: Record<string, any> = {};
-						llm_commands.forEach((command, index) => {
-							obj[command] = row[index] || null;
-						});
-						return obj;
-					});
-
-					await db
-						.update(generations)
-						.set({
-							status: "finished",
-							data: {
-								columns: llm_commands,
-								llm_commands: llm_commands,
-								rows: rows,
-							},
-						})
-						.where(eq(generations.id, generationId));
-				});
-
-				return {
-					message: `Successfully generated ${mockData.length} rows of data`,
-					generationId,
-					status: "finished",
-					rowCount: mockData.length,
-				};
-			}
-		} catch (error) {
-			// Handle any errors that occur during the process
-			await step.run("update-status-error-catch", async () => {
-				try {
-					await db
-						.update(generations)
-						.set({
-							status: "error",
-							data: {
-								columns: [],
-								llm_commands: [],
-								rows: [],
-								error: error instanceof Error ? error.message : String(error),
-							},
-						})
-						.where(eq(generations.id, generationId));
-				} catch (dbError) {
-					console.error(
-						"Failed to update database with error status:",
-						dbError
-					);
-				}
+			vectors.push({
+				id: `content-${sessionId}-${Date.now()}-${i}`,
+				values: embedding as number[],
+				metadata: { content: chunk },
 			});
 
-			return {
-				error: error instanceof Error ? error.message : String(error),
-				generationId,
-				status: "error",
-			};
+			// Upsert in batches to avoid overwhelming the API
+			if (vectors.length === batchSize) {
+				await index.upsert(vectors);
+				vectors.length = 0; // Clear the batch
+			}
 		}
+
+		// Upsert any remaining vectors
+		if (vectors.length > 0) {
+			await index.upsert(vectors);
+		}
+	}
+	return { success: true, count: contentItems.length };
+}
+
+async function queryContent(sessionId: string, question: string) {
+	const index = pinecone.index(indexName).namespace(sessionId);
+
+	const questionEmbedding = await hf.featureExtraction({
+		model: embeddingModel, // *** FIX: Use the same model for querying ***
+		inputs: question,
+	});
+
+	const queryResponse = await index.query({
+		vector: questionEmbedding as number[],
+		topK: 3,
+		includeMetadata: true,
+	});
+
+	return queryResponse.matches
+		.map((match) => (match.metadata?.content as string) || "")
+		.filter(Boolean);
+}
+
+async function generateAnswer(question: string, contexts: string[]) {
+	const contextText = contexts.join("\n\n---\n\n");
+	const prompt = `Context:\n${contextText}\n\nQuestion: ${question}\n\nAnswer:`;
+
+	const response = await fetch(
+		"https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1/v1/chat/completions",
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				messages: [{ role: "user", content: prompt }],
+				max_tokens: 500,
+			}),
+		}
+	);
+
+	if (!response.ok) {
+		throw new Error(`API error: ${response.statusText}`);
+	}
+
+	const data: MistralResponse = await response.json();
+	return data.choices[0].message.content;
+}
+
+export const ragSystem = inngest.createFunction(
+	{ id: "rag-system-simplified" },
+	{ event: "ai/rag.process" },
+	async ({ event, step }) => {
+		const { sessionId, contentItems, question, mode } = event.data;
+
+		if (mode === "upload") {
+			const result = await step.run("upload-content", () =>
+				uploadContent(sessionId, contentItems)
+			);
+			return { status: "finished", ...result };
+		}
+
+		if (mode === "query") {
+			if (!question) {
+				throw new Error("A question is required for query mode.");
+			}
+			const contexts = await step.run("query-content", () =>
+				queryContent(sessionId, question)
+			);
+			const answer = await step.run("generate-answer", () =>
+				generateAnswer(question, contexts)
+			);
+			return { status: "finished", question, answer };
+		}
+
+		throw new Error(`Invalid mode: ${mode}`);
 	}
 );
