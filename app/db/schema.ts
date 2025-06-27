@@ -30,6 +30,23 @@ export const generations = pgTable("generations", {
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const analysis = pgTable("analysis", {
+	id: uuid("id").defaultRandom().primaryKey(),
+	userId: text("user_id")
+		.notNull()
+		.references(() => users.id, { onDelete: "cascade" }),
+	name: text("name"),
+	data: jsonb("data").notNull().default('{"links": []}'),
+	createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const datasets = pgTable("datasets", {
+	id: uuid("id").defaultRandom().primaryKey(),
+	name: text("name"),
+	link: text("link"),
+	updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const usersRelations = relations(users, ({ many }) => ({
 	generations: many(generations),
 }));

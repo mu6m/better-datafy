@@ -9,10 +9,11 @@ import {
 	Pickaxe,
 	WashingMachine,
 	BarChart2,
+	Rss,
 	File,
 	Video,
 } from "lucide-react";
-import { Outlet, redirect } from "@remix-run/react";
+import { Outlet, redirect, useLocation } from "@remix-run/react";
 import { SignOutButton } from "@clerk/remix";
 import { LoaderFunction } from "@remix-run/node";
 import { getAuth } from "@clerk/remix/ssr.server";
@@ -28,15 +29,14 @@ export const loader: LoaderFunction = async (args) => {
 
 export default function Dashboard() {
 	const [sidebarOpen, setSidebarOpen] = useState(false);
-
-	const currentPath =
-		typeof window !== "undefined" ? window.location.pathname : "/dashboard";
+	const location = useLocation();
 
 	const navigation = [
-		// { name: "Datasets", href: "/dashboard", icon: File },
-		{ name: "Generate", href: "/dashboard", icon: WashingMachine },
+		{ name: "Datasets", href: "/dashboard/datasets", icon: File },
+		{ name: "Generate", href: "/dashboard/generate", icon: WashingMachine },
 		{ name: "Analyze", href: "/dashboard/analyze", icon: BarChart3 },
 		{ name: "Scrape", href: "/dashboard/scrape", icon: Pickaxe },
+		{ name: "Rss Feed AI", href: "/dashboard/rss", icon: Rss },
 		{ name: "Yolo Training", href: "/dashboard/yolo", icon: Video },
 		{ name: "Stock LLM", href: "/dashboard/stockllm", icon: BarChart2 },
 	];
@@ -76,7 +76,7 @@ export default function Dashboard() {
 				<nav className="flex-1 px-3 py-6 overflow-y-auto max-h-[83vh]">
 					<div className="space-y-1">
 						{navigation.map((item) => {
-							const isCurrent = currentPath === item.href;
+							const isCurrent = location.pathname === item.href;
 							return (
 								<a
 									key={item.name}

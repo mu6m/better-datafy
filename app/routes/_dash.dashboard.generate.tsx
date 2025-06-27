@@ -14,7 +14,7 @@ import {
 } from "@remix-run/node";
 import { eq } from "drizzle-orm";
 import { db } from "~/db/db.server";
-import { generations, users } from "~/db/schema"; // Adjust import path as needed
+import { generations, users } from "~/db/schema";
 import { inngest } from "~/inngest/client";
 import { getAuth, rootAuthLoader } from "@clerk/remix/ssr.server";
 
@@ -141,7 +141,7 @@ export async function action(args: ActionFunctionArgs) {
 				},
 			});
 
-			return redirect("/dashboard");
+			return redirect("/dashboard/generate");
 		} catch (error) {
 			console.error("Failed to create generation:", error);
 			return json(
