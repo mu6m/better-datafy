@@ -1,12 +1,13 @@
 import { generateAIData } from "./generate";
-import { ragSystem } from "./analyze";
+import { ragProcess, ragQuery } from "./analyze";
 import { llmScraper } from "./scrape";
 import { llmRSS } from "./rss";
 import { saudiNewsSync } from "./stock";
 
 export const functions = [
 	generateAIData,
-	ragSystem,
+	ragProcess,
+	ragQuery,
 	llmScraper,
 	llmRSS,
 	saudiNewsSync,

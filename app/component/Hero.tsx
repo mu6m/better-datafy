@@ -133,7 +133,7 @@ export default function DatafyHero() {
 								</SignInButton>
 							) : (
 								<a
-									href="/dashboard"
+									href="/dashboard/"
 									className="group relative px-8 py-4 bg-gradient-to-r from-purple-500 via-blue-500 to-cyan-500 text-white font-semibold rounded-2xl shadow-2xl hover:shadow-purple-500/25 transition-all duration-300 hover:scale-105 hover:-translate-y-1"
 								>
 									<span className="flex items-center gap-2">

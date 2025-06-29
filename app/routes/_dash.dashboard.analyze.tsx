@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from "react";
-import { X, Plus, Download } from "lucide-react";
+import { Plus, Minus } from "lucide-react";
 import {
 	Form,
 	useLoaderData,
 	useNavigation,
 	useRevalidator,
+	useActionData,
 } from "@remix-run/react";
 import {
 	json,
@@ -14,39 +15,44 @@ import {
 } from "@remix-run/node";
 import { eq } from "drizzle-orm";
 import { db } from "~/db/db.server";
-import { generations, users } from "~/db/schema";
+import { analysis, users } from "~/db/schema";
 import { inngest } from "~/inngest/client";
 import { getAuth, rootAuthLoader } from "@clerk/remix/ssr.server";
+import { z } from "zod";
 
-type GenerationStatus = "error" | "running" | "finished";
+const createAnalysisSchema = z.object({
+	name: z
+		.string()
+		.min(1, "Name is required")
+		.max(100, "Name must be less than 100 characters"),
+	sources: z
+		.array(
+			z
+				.string()
+				.min(1, "Source cannot be empty")
+				.max(1500, "Source must be less than 1500 characters")
+		)
+		.min(1, "At least 1 source is required")
+		.max(5, "Maximum 5 sources allowed"),
+});
 
-type GenerationData = {
-	columns: string[];
-	llm_commands: string[];
-	rows: Record<string, any>[];
-};
+const querySchema = z.object({
+	analysisId: z.string().uuid("Invalid analysis ID"),
+	question: z
+		.string()
+		.min(1, "Question is required")
+		.max(500, "Question must be less than 500 characters"),
+});
 
-type Generation = {
-	id: string;
-	userId: string;
-	name: string | null;
-	len: number | null;
-	status: GenerationStatus;
-	data: GenerationData;
-	createdAt: Date;
-};
-
-// Loader function - fetch generations from DB based on authenticated user
 export const loader = async (args: LoaderFunctionArgs) => {
 	const authData = await rootAuthLoader(args);
 	const { userId } = await getAuth(args);
 
 	if (!userId) {
-		return json({ generations: [] });
+		return json({ analysis: [] });
 	}
 
 	try {
-		// Ensure user exists in database
 		const existingUser = await db
 			.select()
 			.from(users)
@@ -56,33 +62,30 @@ export const loader = async (args: LoaderFunctionArgs) => {
 			await db.insert(users).values({ id: userId });
 		}
 
-		// Fetch all generations for the authenticated user
-		const userGenerations = await db
+		const userAnalysis = await db
 			.select()
-			.from(generations)
-			.where(eq(generations.userId, userId))
-			.orderBy(generations.createdAt); // Order by creation date
+			.from(analysis)
+			.where(eq(analysis.userId, userId))
+			.orderBy(analysis.createdAt);
 
 		return json({
-			generations: userGenerations,
+			analysis: userAnalysis,
 			authData,
 		});
 	} catch (error) {
-		console.error("Failed to fetch generations:", error);
+		console.error("Failed to fetch analysis:", error);
 		return json({
-			generations: [],
+			analysis: [],
 			authData,
-			error: "Failed to fetch generations",
+			error: "Failed to fetch analysis",
 		});
 	}
 };
 
-// Action function - handle generation creation
 export async function action(args: ActionFunctionArgs) {
 	const formData = await args.request.formData();
 	const formType = formData.get("_form") as string;
 
-	// Get authenticated user ID
 	const { userId } = await getAuth(args);
 
 	if (!userId) {
@@ -94,58 +97,89 @@ export async function action(args: ActionFunctionArgs) {
 
 	if (formType === "create") {
 		const name = formData.get("name") as string;
-		const len = parseInt(formData.get("len") as string);
-		const llmCommandsJson = formData.get("llmCommands") as string;
+		const sourcesCount = parseInt(formData.get("sourcesCount") as string);
 
-		if (!name?.trim() || !llmCommandsJson) {
+		const sources = [];
+		for (let i = 0; i < sourcesCount; i++) {
+			const source = formData.get(`source_${i}`) as string;
+			if (source?.trim()) {
+				sources.push(source.trim());
+			}
+		}
+
+		const validation = createAnalysisSchema.safeParse({ name, sources });
+
+		if (!validation.success) {
 			return json(
-				{ success: false, error: "Name and commands are required" },
+				{
+					success: false,
+					error: validation.error.errors[0].message,
+					fieldErrors: validation.error.flatten().fieldErrors,
+				},
 				{ status: 400 }
 			);
 		}
 
-		let llmCommands;
 		try {
-			llmCommands = JSON.parse(llmCommandsJson);
-		} catch {
-			return json(
-				{ success: false, error: "Invalid commands format" },
-				{ status: 400 }
-			);
-		}
-
-		try {
-			// Create new generation record in database
-			const newGeneration = await db
-				.insert(generations)
+			const newAnalysis = await db
+				.insert(analysis)
 				.values({
 					userId,
-					name: name.trim(),
-					len,
+					name: validation.data.name,
 					status: "running",
-					data: {
-						columns: [],
-						llm_commands: llmCommands,
-						rows: [],
-					},
+					data: { data: validation.data.sources },
 				})
-				.returning({ id: generations.id });
+				.returning({ id: analysis.id });
 
-			const generationId = newGeneration[0].id;
+			const analysisId = newAnalysis[0].id;
 
-			// Send event to Inngest
 			await inngest.send({
-				name: "ai/generate.tabular.data",
+				name: "ai/rag.process",
 				data: {
-					generationId,
+					analysisId,
 				},
 			});
 
-			return redirect("/dashboard/generate");
+			return redirect("/dashboard/analyze");
 		} catch (error) {
-			console.error("Failed to create generation:", error);
+			console.error("Failed to create analysis:", error);
 			return json(
-				{ success: false, error: "Failed to create generation" },
+				{ success: false, error: "Failed to create analysis" },
+				{ status: 500 }
+			);
+		}
+	}
+
+	if (formType === "query") {
+		const analysisId = formData.get("analysisId") as string;
+		const question = formData.get("question") as string;
+
+		const validation = querySchema.safeParse({ analysisId, question });
+
+		if (!validation.success) {
+			return json(
+				{
+					success: false,
+					error: validation.error.errors[0].message,
+				},
+				{ status: 400 }
+			);
+		}
+
+		try {
+			const result = await inngest.send({
+				name: "ai/rag.query",
+				data: {
+					analysisId: validation.data.analysisId,
+					question: validation.data.question,
+				},
+			});
+
+			return json({ success: true, result });
+		} catch (error) {
+			console.error("Failed to query analysis:", error);
+			return json(
+				{ success: false, error: "Failed to query analysis" },
 				{ status: 500 }
 			);
 		}
@@ -154,311 +188,235 @@ export async function action(args: ActionFunctionArgs) {
 	return json({ success: false, error: "Invalid form type" }, { status: 400 });
 }
 
-export default function GenerationDashboard() {
+export default function AnalysisDashboard() {
 	const revalidator = useRevalidator();
+	const actionData = useActionData<typeof action>();
 
 	useEffect(() => {
 		const interval = setInterval(() => {
 			revalidator.revalidate();
-		}, 5000);
+		}, 500);
 
 		return () => clearInterval(interval);
 	}, []);
 
-	const { generations } = useLoaderData<typeof loader>();
-	const [showCreateModal, setShowCreateModal] = useState(false);
+	const { analysis: analysisData } = useLoaderData<typeof loader>();
 	const navigation = useNavigation();
 
-	const isSubmitting =
+	const [sourcesCount, setSourcesCount] = useState(1);
+	const [sources, setSources] = useState<string[]>([""]);
+
+	const isCreating =
 		navigation.state === "submitting" &&
 		navigation.formData?.get("_form") === "create";
 
-	const handleDownloadJson = (generation: Generation) => {
-		const jsonContent = JSON.stringify(generation.data, null, 2);
-		const blob = new Blob([jsonContent], { type: "application/json" });
-		const url = URL.createObjectURL(blob);
+	const isQuerying =
+		navigation.state === "submitting" &&
+		navigation.formData?.get("_form") === "query";
 
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = `${generation.name || "generation"}_${generation.id}.json`;
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
+	const addSource = () => {
+		if (sourcesCount < 5) {
+			setSourcesCount(sourcesCount + 1);
+			setSources([...sources, ""]);
+		}
+	};
+
+	const removeSource = (index: number) => {
+		if (sourcesCount > 1) {
+			setSourcesCount(sourcesCount - 1);
+			setSources(sources.filter((_, i) => i !== index));
+		}
+	};
+
+	const updateSource = (index: number, value: string) => {
+		const newSources = [...sources];
+		newSources[index] = value;
+		setSources(newSources);
+	};
+
+	const resetForm = () => {
+		setSourcesCount(1);
+		setSources([""]);
 	};
 
 	useEffect(() => {
-		if (navigation.state === "idle" && !isSubmitting) {
-			setShowCreateModal(false);
+		if (navigation.state === "idle" && !isCreating && actionData?.success) {
+			resetForm();
 		}
-	}, [navigation.state, isSubmitting]);
+	}, [navigation.state, isCreating, actionData]);
 
 	return (
-		<div className="max-w-4xl mx-auto p-6">
-			<div className="bg-white rounded-lg shadow-sm border border-gray-200">
-				<div className="flex items-center justify-between p-6 border-b border-gray-200">
-					<h2 className="text-xl font-semibold text-gray-900">Data Analysis</h2>
+		<div className="max-w-4xl mx-auto p-6 space-y-6">
+			<div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+				<h2 className="text-xl font-semibold text-gray-900 mb-4">
+					Create New Analysis
+				</h2>
+
+				{actionData?.error && (
+					<div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+						<p className="text-sm text-red-600">{actionData.error}</p>
+					</div>
+				)}
+
+				<Form method="post" className="space-y-4">
+					<input type="hidden" name="_form" value="create" />
+					<input type="hidden" name="sourcesCount" value={sourcesCount} />
+
+					<div>
+						<label className="block text-sm font-medium text-gray-700 mb-1">
+							Analysis Name
+						</label>
+						<input
+							type="text"
+							name="name"
+							className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+							placeholder="Enter analysis name"
+							required
+							disabled={isCreating}
+							maxLength={100}
+						/>
+					</div>
+
+					<div>
+						<div className="flex items-center justify-between mb-2">
+							<label className="block text-sm font-medium text-gray-700">
+								Data Sources ({sourcesCount}/5)
+							</label>
+							<div className="flex gap-2">
+								{sourcesCount < 5 && (
+									<button
+										type="button"
+										onClick={addSource}
+										className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+										disabled={isCreating}
+									>
+										<Plus className="w-4 h-4 inline mr-1" />
+										Add Source
+									</button>
+								)}
+							</div>
+						</div>
+
+						<div className="space-y-3">
+							{Array.from({ length: sourcesCount }, (_, index) => (
+								<div key={index} className="relative">
+									<div className="flex items-start gap-2">
+										<div className="flex-1">
+											<textarea
+												name={`source_${index}`}
+												value={sources[index] || ""}
+												onChange={(e) => updateSource(index, e.target.value)}
+												rows={4}
+												className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+												placeholder={`Enter data source ${index + 1}...`}
+												required
+												disabled={isCreating}
+												maxLength={1500}
+											/>
+											<div className="mt-1 text-xs text-gray-500">
+												{sources[index]?.length || 0}/1500 characters
+											</div>
+										</div>
+										{sourcesCount > 1 && (
+											<button
+												type="button"
+												onClick={() => removeSource(index)}
+												className="mt-2 p-1 text-red-600 hover:text-red-800"
+												disabled={isCreating}
+											>
+												<Minus className="w-4 h-4" />
+											</button>
+										)}
+									</div>
+								</div>
+							))}
+						</div>
+					</div>
+
 					<button
-						onClick={() => setShowCreateModal(true)}
-						className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
+						type="submit"
+						disabled={isCreating}
+						className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50"
 					>
 						<Plus className="w-4 h-4 mr-2" />
-						New Analysis
+						{isCreating ? "Creating..." : "Create Analysis"}
 					</button>
-				</div>
+				</Form>
+			</div>
 
-				<div className="overflow-x-auto">
-					<table className="w-full">
-						<thead className="bg-gray-50">
-							<tr>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Name
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									number of links
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Edit
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Ask
-								</th>
-							</tr>
-						</thead>
-						<tbody className="bg-white divide-y divide-gray-200">
-							{generations.length === 0 ? (
-								<tr>
-									<td
-										colSpan={4}
-										className="px-6 py-12 text-center text-gray-500"
-									>
-										No generations found. Create your first one to get started.
-									</td>
-								</tr>
-							) : (
-								generations.map((generation) => (
-									<tr key={generation.id} className="hover:bg-gray-50">
-										<td className="px-6 py-4 whitespace-nowrap">
-											<div className="text-sm font-medium text-gray-900">
-												{generation.name ||
-													`Generation ${generation.id.slice(0, 8)}`}
-											</div>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-											{generation.data?.rows?.length || 0}
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap">
+			<div className="bg-white rounded-lg shadow-sm border border-gray-200">
+				<div className="p-6 border-b border-gray-200">
+					<h2 className="text-xl font-semibold text-gray-900">Your Analysis</h2>
+				</div>
+				<div className="divide-y divide-gray-200">
+					{analysisData.length === 0 ? (
+						<div className="p-6 text-center text-gray-500">
+							No analysis found. Create your first one above.
+						</div>
+					) : (
+						analysisData.map((item: any) => (
+							<div key={item.id} className="p-6">
+								<div className="flex items-center justify-between mb-4">
+									<div>
+										<h3 className="text-lg font-medium text-gray-900">
+											{item.name || `Analysis ${item.id.slice(0, 8)}`}
+										</h3>
+										<div className="flex items-center gap-2 mt-1">
 											<span
 												className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-													generation.status === "finished"
+													item.status === "finished"
 														? "bg-green-100 text-green-800"
-														: generation.status === "error"
+														: item.status === "error"
 														? "bg-red-100 text-red-800"
 														: "bg-blue-100 text-blue-800"
 												}`}
 											>
-												{generation.status}
+												{item.status}
 											</span>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-											<button
-												onClick={() => handleDownloadJson(generation)}
-												className="inline-flex items-center text-blue-600 hover:text-blue-800 disabled:text-gray-400"
-												disabled={!generation.data?.rows?.length}
-											>
-												<Download className="w-4 h-4 mr-1" />
-												JSON
-											</button>
-										</td>
-									</tr>
-								))
-							)}
-						</tbody>
-					</table>
-				</div>
-			</div>
+											<span className="text-xs text-gray-500">
+												{item.data?.data?.length || 0} sources
+											</span>
+										</div>
+									</div>
+								</div>
 
-			<CreateGenerationModal
-				isOpen={showCreateModal}
-				onClose={() => setShowCreateModal(false)}
-				isSubmitting={isSubmitting}
-			/>
-		</div>
-	);
-}
-
-function CreateGenerationModal({
-	isOpen,
-	onClose,
-	isSubmitting,
-}: {
-	isOpen: boolean;
-	onClose: () => void;
-	isSubmitting: boolean;
-}) {
-	const [name, setName] = useState("");
-	const [len, setLen] = useState(100);
-	const [llmCommands, setLlmCommands] = useState([""]);
-
-	const addCommand = () => {
-		setLlmCommands([...llmCommands, ""]);
-	};
-
-	const removeCommand = (index: number) => {
-		if (llmCommands.length > 1) {
-			setLlmCommands(llmCommands.filter((_, i) => i !== index));
-		}
-	};
-
-	const updateCommand = (index: number, value: string) => {
-		const newCommands = [...llmCommands];
-		newCommands[index] = value;
-		setLlmCommands(newCommands);
-	};
-
-	const resetForm = () => {
-		setName("");
-		setLen(100);
-		setLlmCommands([""]);
-	};
-
-	const handleSubmit = (e: React.FormEvent) => {
-		const validCommands = llmCommands.filter((cmd) => cmd.trim());
-		if (!name.trim() || validCommands.length === 0) {
-			e.preventDefault();
-			alert("Please provide a name and at least one command.");
-			return;
-		}
-	};
-
-	// Reset form when modal closes
-	useEffect(() => {
-		if (!isOpen) {
-			resetForm();
-		}
-	}, [isOpen]);
-
-	if (!isOpen) return null;
-
-	return (
-		<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
-				<div className="flex items-center justify-between p-6 border-b border-gray-200">
-					<h3 className="text-lg font-semibold text-gray-900">
-						Create New Generation
-					</h3>
-					<button
-						onClick={onClose}
-						className="text-gray-400 hover:text-gray-600"
-						disabled={isSubmitting}
-					>
-						<X className="w-6 h-6" />
-					</button>
-				</div>
-
-				<Form method="post" onSubmit={handleSubmit}>
-					<input type="hidden" name="_form" value="create" />
-					<input
-						type="hidden"
-						name="llmCommands"
-						value={JSON.stringify(llmCommands.filter((cmd) => cmd.trim()))}
-					/>
-
-					<div className="p-6">
-						<div className="space-y-4">
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Name
-								</label>
-								<input
-									type="text"
-									name="name"
-									value={name}
-									onChange={(e) => setName(e.target.value)}
-									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									placeholder="e.g., Customer Data"
-									required
-									disabled={isSubmitting}
-								/>
-							</div>
-
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Number of Rows
-								</label>
-								<input
-									type="number"
-									name="len"
-									value={len}
-									onChange={(e) => setLen(Number(e.target.value))}
-									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									min="1"
-									max="10000"
-									required
-									disabled={isSubmitting}
-								/>
-							</div>
-
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									LLM Commands
-								</label>
-								<div className="space-y-2">
-									{llmCommands.map((command, index) => (
-										<div key={index} className="flex gap-2">
+								{item.status === "finished" && (
+									<div className="flex flex-col gap-2">
+										<Form method="post" className="flex gap-2">
+											<input type="hidden" name="_form" value="query" />
+											<input type="hidden" name="analysisId" value={item.id} />
 											<input
 												type="text"
-												value={command}
-												onChange={(e) => updateCommand(index, e.target.value)}
+												name="question"
 												className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-												placeholder={`Command ${
-													index + 1
-												} (e.g., "Generate a first name")`}
-												disabled={isSubmitting}
+												placeholder="Ask a question about this analysis..."
+												required
+												disabled={isQuerying}
+												maxLength={500}
 											/>
-											{llmCommands.length > 1 && (
-												<button
-													type="button"
-													onClick={() => removeCommand(index)}
-													className="px-3 py-2 text-red-600 hover:text-red-800"
-													disabled={isSubmitting}
-												>
-													<X className="w-4 h-4" />
-												</button>
-											)}
-										</div>
-									))}
-									<button
-										type="button"
-										onClick={addCommand}
-										className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-										disabled={isSubmitting}
-									>
-										+ Add Command
-									</button>
-								</div>
+											<button
+												type="submit"
+												disabled={isQuerying}
+												className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50"
+											>
+												{isQuerying ? "Asking..." : "Ask"}
+											</button>
+										</Form>
+										{item.answer && (
+											<div className="bg-blue-50 border border-blue-200 rounded-md p-4">
+												<div className="bg-white rounded-md p-3 border border-blue-100">
+													<p className="text-sm text-gray-900 whitespace-pre-wrap">
+														{item.answer}
+													</p>
+												</div>
+											</div>
+										)}
+									</div>
+								)}
 							</div>
-						</div>
-
-						<div className="flex gap-3 mt-6">
-							<button
-								type="button"
-								onClick={onClose}
-								className="flex-1 px-4 py-2 text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
-								disabled={isSubmitting}
-							>
-								Cancel
-							</button>
-							<button
-								type="submit"
-								disabled={isSubmitting}
-								className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
-							>
-								{isSubmitting ? "Creating..." : "Create"}
-							</button>
-						</div>
-					</div>
-				</Form>
+						))
+					)}
+				</div>
 			</div>
 		</div>
 	);

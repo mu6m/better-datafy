@@ -39,6 +39,7 @@ export const analysis = pgTable("analysis", {
 		.references(() => users.id, { onDelete: "cascade" }),
 	name: text("name"),
 	data: jsonb("data").notNull().default('{"data": []}'),
+	answer: text("answer"),
 	status: statusEnum("status").notNull().default("running"),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });

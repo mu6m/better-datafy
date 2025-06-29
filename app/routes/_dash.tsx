@@ -79,7 +79,7 @@ export default function Dashboard() {
 					</button>
 				</div>
 
-				<nav className="flex-1 px-3 py-6 overflow-y-auto max-h-[83vh]">
+				<nav className="flex-1 px-3 py-6 overflow-y-auto min-h-[83vh]">
 					<div className="space-y-1">
 						{navigation.map((item) => {
 							const isCurrent = location.pathname === item.href;

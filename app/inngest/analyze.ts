@@ -2,19 +2,13 @@ import { inngest } from "./client";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { InferenceClient } from "@huggingface/inference";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
+import { db } from "~/db/db.server";
+import { analysis } from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 interface ContentItem {
 	type: "link" | "text";
 	text: string;
-}
-
-interface RAGEvent {
-	data: {
-		sessionId: string;
-		contentItems: ContentItem[];
-		question?: string;
-		mode: "upload" | "query";
-	};
 }
 
 interface MistralResponse {
@@ -29,11 +23,8 @@ const pinecone = new Pinecone();
 const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
 const indexName = "datafy";
 
-// --- Model Configuration ---
-// Using a model with a larger dimension. Ensure this matches your index.
-// You can find more models at https://huggingface.co/models?pipeline_tag=feature-extraction
 const embeddingModel = "BAAI/bge-large-en-v1.5";
-const embeddingDimension = 1024; // The dimension of the bge-large-en-v1.5 model
+const embeddingDimension = 1024;
 
 async function fetchUrlContent(url: string): Promise<string> {
 	try {
@@ -59,7 +50,7 @@ async function initializeIndex() {
 	if (!existingIndexes.indexes?.some((index) => index.name === indexName)) {
 		await pinecone.createIndex({
 			name: indexName,
-			dimension: embeddingDimension, // *** FIX: Use the correct dimension for your chosen model ***
+			dimension: embeddingDimension,
 			metric: "cosine",
 			spec: {
 				serverless: {
@@ -72,31 +63,29 @@ async function initializeIndex() {
 	}
 }
 
-/**
- * NEW: A function to split large text into smaller chunks.
- * This is crucial for handling large documents and staying within model context limits.
- */
 async function chunkText(text: string): Promise<string[]> {
 	const splitter = new RecursiveCharacterTextSplitter({
-		chunkSize: 1000, // The maximum size of each chunk
-		chunkOverlap: 100, // The number of characters to overlap between chunks
+		chunkSize: 1000,
+		chunkOverlap: 100,
 	});
 
 	const chunks = await splitter.splitText(text);
 	return chunks;
 }
 
-async function uploadContent(sessionId: string, contentItems: ContentItem[]) {
+async function uploadContent(analysisId: string, textSources: string[]) {
 	await initializeIndex();
-	const index = pinecone.index(indexName).namespace(sessionId);
-	const batchSize = 100; // Pinecone recommends upserting in batches of 100 or fewer
+	const index = pinecone.index(indexName).namespace(analysisId);
+	const batchSize = 100;
 
-	for (const item of contentItems) {
-		const content =
-			item.type === "link" ? await fetchUrlContent(item.text) : item.text;
-
-		// *** NEW: Chunk the content before embedding ***
-		const contentChunks = await chunkText(content);
+	for (let [sourceIndex, textContent] of textSources.entries()) {
+		if (
+			textContent.startsWith("http://") ||
+			textContent.startsWith("https://")
+		) {
+			textContent = await fetchUrlContent(textContent);
+		}
+		const contentChunks = await chunkText(textContent);
 
 		const vectors = [];
 		for (const [i, chunk] of contentChunks.entries()) {
@@ -106,31 +95,29 @@ async function uploadContent(sessionId: string, contentItems: ContentItem[]) {
 			});
 
 			vectors.push({
-				id: `content-${sessionId}-${Date.now()}-${i}`,
+				id: `content-${analysisId}-source${sourceIndex}-${Date.now()}-${i}`,
 				values: embedding as number[],
-				metadata: { content: chunk },
+				metadata: { content: chunk, sourceIndex },
 			});
 
-			// Upsert in batches to avoid overwhelming the API
 			if (vectors.length === batchSize) {
 				await index.upsert(vectors);
-				vectors.length = 0; // Clear the batch
+				vectors.length = 0;
 			}
 		}
 
-		// Upsert any remaining vectors
 		if (vectors.length > 0) {
 			await index.upsert(vectors);
 		}
 	}
-	return { success: true, count: contentItems.length };
+	return { success: true, count: textSources.length };
 }
 
-async function queryContent(sessionId: string, question: string) {
-	const index = pinecone.index(indexName).namespace(sessionId);
+async function queryContent(analysisId: string, question: string) {
+	const index = pinecone.index(indexName).namespace(analysisId);
 
 	const questionEmbedding = await hf.featureExtraction({
-		model: embeddingModel, // *** FIX: Use the same model for querying ***
+		model: embeddingModel,
 		inputs: question,
 	});
 
@@ -172,32 +159,78 @@ async function generateAnswer(question: string, contexts: string[]) {
 	return data.choices[0].message.content;
 }
 
-export const ragSystem = inngest.createFunction(
-	{ id: "rag-system-simplified" },
+export const ragProcess = inngest.createFunction(
+	{ id: "rag-process" },
 	{ event: "ai/rag.process" },
 	async ({ event, step }) => {
-		const { sessionId, contentItems, question, mode } = event.data;
+		const { analysisId } = event.data;
 
-		if (mode === "upload") {
-			const result = await step.run("upload-content", () =>
-				uploadContent(sessionId, contentItems)
+		try {
+			await step.run("update-status-running", async () => {
+				await db
+					.update(analysis)
+					.set({ status: "running" })
+					.where(eq(analysis.id, analysisId));
+			});
+
+			const analysisData = await step.run("fetch-analysis", async () => {
+				const result = await db
+					.select()
+					.from(analysis)
+					.where(eq(analysis.id, analysisId))
+					.limit(1);
+
+				if (result.length === 0) {
+					throw new Error("Analysis not found");
+				}
+
+				return result[0];
+			});
+
+			const textSources = analysisData.data?.data || [];
+
+			await step.run("upload-content", () =>
+				uploadContent(analysisId, textSources)
 			);
-			return { status: "finished", ...result };
+
+			await step.run("update-status-finished", async () => {
+				await db
+					.update(analysis)
+					.set({ status: "finished" })
+					.where(eq(analysis.id, analysisId));
+			});
+
+			return { status: "finished", analysisId };
+		} catch (error) {
+			await step.run("update-status-error", async () => {
+				await db
+					.update(analysis)
+					.set({ status: "error" })
+					.where(eq(analysis.id, analysisId));
+			});
+
+			throw error;
 		}
+	}
+);
 
-		if (mode === "query") {
-			if (!question) {
-				throw new Error("A question is required for query mode.");
-			}
-			const contexts = await step.run("query-content", () =>
-				queryContent(sessionId, question)
-			);
-			const answer = await step.run("generate-answer", () =>
-				generateAnswer(question, contexts)
-			);
-			return { status: "finished", question, answer };
-		}
+export const ragQuery = inngest.createFunction(
+	{ id: "rag-query" },
+	{ event: "ai/rag.query" },
+	async ({ event, step }) => {
+		const { analysisId, question } = event.data;
 
-		throw new Error(`Invalid mode: ${mode}`);
+		const contexts = await step.run("query-content", () =>
+			queryContent(analysisId, question)
+		);
+
+		const answer = await step.run("generate-answer", () =>
+			generateAnswer(question, contexts)
+		);
+		await db
+			.update(analysis)
+			.set({ answer })
+			.where(eq(analysis.id, analysisId));
+		return { status: "finished", question, answer };
 	}
 );
