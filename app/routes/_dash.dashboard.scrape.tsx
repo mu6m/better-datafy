@@ -15,59 +15,60 @@ import {
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "~/db/db.server";
-import { generations, users } from "~/db/schema";
+import { scrapes, users } from "~/db/schema";
 import { inngest } from "~/inngest/client";
 import { getAuth, rootAuthLoader } from "@clerk/remix/ssr.server";
 
-type GenerationStatus = "error" | "running" | "finished";
+type ScrapeStatus = "error" | "running" | "finished";
 
-type GenerationData = {
-	columns: string[];
-	llm_commands: string[];
-	rows: Record<string, any>[];
+type ScrapeData = {
+	links: string[];
+	scrape: string[];
+	data: string[][];
 };
 
-type Generation = {
+type Scrape = {
 	id: string;
 	userId: string;
 	name: string | null;
-	len: number | null;
-	status: GenerationStatus;
-	data: GenerationData;
+	status: ScrapeStatus;
+	data: ScrapeData;
 	createdAt: Date;
 };
 
-const CreateGenerationSchema = z.object({
+const CreateScrapeSchema = z.object({
 	name: z
 		.string()
 		.min(1, "Name is required")
 		.max(500, "Name must be 500 characters or less"),
-	len: z
-		.number()
-		.min(1, "Must generate at least 1 row")
-		.max(1000, "Maximum 1000 rows allowed"),
-	llmCommands: z
+	links: z
 		.array(
 			z
 				.string()
-				.min(1, "Command cannot be empty")
-				.max(1000, "Command must be 1000 characters or less")
+				.url("Invalid URL format")
+				.max(500, "URL must be 500 characters or less")
 		)
-		.min(1, "At least one command is required")
-		.max(10, "Maximum 10 commands allowed"),
+		.min(1, "At least one link is required")
+		.max(5, "Maximum 5 links allowed"),
+	scrapeInstructions: z
+		.array(
+			z
+				.string()
+				.min(1, "Instruction cannot be empty")
+				.max(500, "Instruction must be 500 characters or less")
+		)
+		.min(1, "At least one instruction is required"),
 });
 
-// Loader function - fetch generations from DB based on authenticated user
 export const loader = async (args: LoaderFunctionArgs) => {
 	const authData = await rootAuthLoader(args);
 	const { userId } = await getAuth(args);
 
 	if (!userId) {
-		return json({ generations: [] });
+		return json({ scrapes: [] });
 	}
 
 	try {
-		// Ensure user exists in database
 		const existingUser = await db
 			.select()
 			.from(users)
@@ -77,33 +78,30 @@ export const loader = async (args: LoaderFunctionArgs) => {
 			await db.insert(users).values({ id: userId });
 		}
 
-		// Fetch all generations for the authenticated user
-		const userGenerations = await db
+		const userScrapes = await db
 			.select()
-			.from(generations)
-			.where(eq(generations.userId, userId))
-			.orderBy(generations.createdAt); // Order by creation date
+			.from(scrapes)
+			.where(eq(scrapes.userId, userId))
+			.orderBy(scrapes.createdAt);
 
 		return json({
-			generations: userGenerations,
+			scrapes: userScrapes,
 			authData,
 		});
 	} catch (error) {
-		console.error("Failed to fetch generations:", error);
+		console.error("Failed to fetch scrapes:", error);
 		return json({
-			generations: [],
+			scrapes: [],
 			authData,
-			error: "Failed to fetch generations",
+			error: "Failed to fetch scrapes",
 		});
 	}
 };
 
-// Action function - handle generation creation
 export async function action(args: ActionFunctionArgs) {
 	const formData = await args.request.formData();
 	const formType = formData.get("_form") as string;
 
-	// Get authenticated user ID
 	const { userId } = await getAuth(args);
 
 	if (!userId) {
@@ -115,33 +113,24 @@ export async function action(args: ActionFunctionArgs) {
 
 	if (formType === "create") {
 		const name = formData.get("name") as string;
-		const lenString = formData.get("len") as string;
-		const llmCommandsJson = formData.get("llmCommands") as string;
+		const linksJson = formData.get("links") as string;
+		const scrapeInstructionsJson = formData.get("scrapeInstructions") as string;
 
-		// Parse and validate input data
-		let llmCommands;
+		let links, scrapeInstructions;
 		try {
-			llmCommands = JSON.parse(llmCommandsJson);
+			links = JSON.parse(linksJson);
+			scrapeInstructions = JSON.parse(scrapeInstructionsJson);
 		} catch {
 			return json(
-				{ success: false, error: "Invalid commands format" },
+				{ success: false, error: "Invalid data format" },
 				{ status: 400 }
 			);
 		}
 
-		const len = parseInt(lenString);
-		if (isNaN(len)) {
-			return json(
-				{ success: false, error: "Invalid number of rows" },
-				{ status: 400 }
-			);
-		}
-
-		// Validate using Zod schema
-		const validationResult = CreateGenerationSchema.safeParse({
+		const validationResult = CreateScrapeSchema.safeParse({
 			name,
-			len,
-			llmCommands,
+			links,
+			scrapeInstructions,
 		});
 
 		if (!validationResult.success) {
@@ -158,37 +147,34 @@ export async function action(args: ActionFunctionArgs) {
 		const validatedData = validationResult.data;
 
 		try {
-			// Create new generation record in database
-			const newGeneration = await db
-				.insert(generations)
+			const newScrape = await db
+				.insert(scrapes)
 				.values({
 					userId,
 					name: validatedData.name.trim(),
-					len: validatedData.len,
 					status: "running",
 					data: {
-						columns: [],
-						llm_commands: validatedData.llmCommands,
-						rows: [],
+						links: validatedData.links,
+						scrape: validatedData.scrapeInstructions,
+						data: [],
 					},
 				})
-				.returning({ id: generations.id });
+				.returning({ id: scrapes.id });
 
-			const generationId = newGeneration[0].id;
+			const scrapeId = newScrape[0].id;
 
-			// Send event to Inngest
 			await inngest.send({
-				name: "ai/generate.tabular.data",
+				name: "ai/llm.scrape",
 				data: {
-					generationId,
+					scrapeId,
 				},
 			});
 
-			return redirect("/dashboard/generate");
+			return redirect("/dashboard/scrape");
 		} catch (error) {
-			console.error("Failed to create generation:", error);
+			console.error("Failed to create scrape:", error);
 			return json(
-				{ success: false, error: "Failed to create generation" },
+				{ success: false, error: "Failed to create scrape" },
 				{ status: 500 }
 			);
 		}
@@ -197,7 +183,7 @@ export async function action(args: ActionFunctionArgs) {
 	return json({ success: false, error: "Invalid form type" }, { status: 400 });
 }
 
-export default function GenerationDashboard() {
+export default function ScrapesDashboard() {
 	const revalidator = useRevalidator();
 
 	useEffect(() => {
@@ -208,7 +194,7 @@ export default function GenerationDashboard() {
 		return () => clearInterval(interval);
 	}, []);
 
-	const { generations } = useLoaderData<typeof loader>();
+	const { scrapes } = useLoaderData<typeof loader>();
 	const [showCreateModal, setShowCreateModal] = useState(false);
 	const navigation = useNavigation();
 
@@ -216,14 +202,14 @@ export default function GenerationDashboard() {
 		navigation.state === "submitting" &&
 		navigation.formData?.get("_form") === "create";
 
-	const handleDownloadJson = (generation: Generation) => {
-		const jsonContent = JSON.stringify(generation.data, null, 2);
+	const handleDownloadJson = (scrape: Scrape) => {
+		const jsonContent = JSON.stringify(scrape.data, null, 2);
 		const blob = new Blob([jsonContent], { type: "application/json" });
 		const url = URL.createObjectURL(blob);
 
 		const a = document.createElement("a");
 		a.href = url;
-		a.download = `${generation.name || "generation"}_${generation.id}.json`;
+		a.download = `${scrape.name || "scrape"}_${scrape.id}.json`;
 		document.body.appendChild(a);
 		a.click();
 		document.body.removeChild(a);
@@ -240,15 +226,13 @@ export default function GenerationDashboard() {
 		<div className="max-w-4xl mx-auto p-6">
 			<div className="bg-white rounded-lg shadow-sm border border-gray-200">
 				<div className="flex items-center justify-between p-6 border-b border-gray-200">
-					<h2 className="text-xl font-semibold text-gray-900">
-						Data Generations
-					</h2>
+					<h2 className="text-xl font-semibold text-gray-900">Web Scrapes</h2>
 					<button
 						onClick={() => setShowCreateModal(true)}
 						className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
 					>
 						<Plus className="w-4 h-4 mr-2" />
-						New Generation
+						New Scrape
 					</button>
 				</div>
 
@@ -260,7 +244,7 @@ export default function GenerationDashboard() {
 									Name
 								</th>
 								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Rows Generated
+									Links Count
 								</th>
 								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
 									Status
@@ -271,45 +255,44 @@ export default function GenerationDashboard() {
 							</tr>
 						</thead>
 						<tbody className="bg-white divide-y divide-gray-200">
-							{generations.length === 0 ? (
+							{scrapes.length === 0 ? (
 								<tr>
 									<td
 										colSpan={4}
 										className="px-6 py-12 text-center text-gray-500"
 									>
-										No generations found. Create your first one to get started.
+										No scrapes found. Create your first one to get started.
 									</td>
 								</tr>
 							) : (
-								generations.map((generation: any) => (
-									<tr key={generation.id} className="hover:bg-gray-50">
+								scrapes.map((scrape: any) => (
+									<tr key={scrape.id} className="hover:bg-gray-50">
 										<td className="px-6 py-4 whitespace-nowrap">
 											<div className="text-sm font-medium text-gray-900">
-												{generation.name ||
-													`Generation ${generation.id.slice(0, 8)}`}
+												{scrape.name || `Scrape ${scrape.id.slice(0, 8)}`}
 											</div>
 										</td>
 										<td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-											{generation.data?.rows?.length || 0}
+											{scrape.data?.links?.length || 0}
 										</td>
 										<td className="px-6 py-4 whitespace-nowrap">
 											<span
 												className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-													generation.status === "finished"
+													scrape.status === "finished"
 														? "bg-green-100 text-green-800"
-														: generation.status === "error"
+														: scrape.status === "error"
 														? "bg-red-100 text-red-800"
 														: "bg-blue-100 text-blue-800"
 												}`}
 											>
-												{generation.status}
+												{scrape.status}
 											</span>
 										</td>
 										<td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
 											<button
-												onClick={() => handleDownloadJson(generation)}
+												onClick={() => handleDownloadJson(scrape)}
 												className="inline-flex items-center text-blue-600 hover:text-blue-800 disabled:text-gray-400"
-												disabled={!generation.data?.rows?.length}
+												disabled={!scrape.data?.data?.length}
 											>
 												<Download className="w-4 h-4 mr-1" />
 												JSON
@@ -323,7 +306,7 @@ export default function GenerationDashboard() {
 				</div>
 			</div>
 
-			<CreateGenerationModal
+			<CreateScrapeModal
 				isOpen={showCreateModal}
 				onClose={() => setShowCreateModal(false)}
 				isSubmitting={isSubmitting}
@@ -332,7 +315,7 @@ export default function GenerationDashboard() {
 	);
 }
 
-function CreateGenerationModal({
+function CreateScrapeModal({
 	isOpen,
 	onClose,
 	isSubmitting,
@@ -342,45 +325,61 @@ function CreateGenerationModal({
 	isSubmitting: boolean;
 }) {
 	const [name, setName] = useState("");
-	const [len, setLen] = useState(100);
-	const [llmCommands, setLlmCommands] = useState([""]);
+	const [links, setLinks] = useState([""]);
+	const [scrapeInstructions, setScrapeInstructions] = useState([""]);
 	const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
-	const addCommand = () => {
-		if (llmCommands.length < 10) {
-			setLlmCommands([...llmCommands, ""]);
+	const addLink = () => {
+		if (links.length < 5) {
+			setLinks([...links, ""]);
 		}
 	};
 
-	const removeCommand = (index: number) => {
-		if (llmCommands.length > 1) {
-			setLlmCommands(llmCommands.filter((_, i) => i !== index));
+	const removeLink = (index: number) => {
+		if (links.length > 1) {
+			setLinks(links.filter((_, i) => i !== index));
 		}
 	};
 
-	const updateCommand = (index: number, value: string) => {
-		const newCommands = [...llmCommands];
-		newCommands[index] = value.slice(0, 1000); // Limit to 1000 characters
-		setLlmCommands(newCommands);
+	const updateLink = (index: number, value: string) => {
+		const newLinks = [...links];
+		newLinks[index] = value.slice(0, 500);
+		setLinks(newLinks);
+	};
+
+	const addInstruction = () => {
+		setScrapeInstructions([...scrapeInstructions, ""]);
+	};
+
+	const removeInstruction = (index: number) => {
+		if (scrapeInstructions.length > 1) {
+			setScrapeInstructions(scrapeInstructions.filter((_, i) => i !== index));
+		}
+	};
+
+	const updateInstruction = (index: number, value: string) => {
+		const newInstructions = [...scrapeInstructions];
+		newInstructions[index] = value.slice(0, 500);
+		setScrapeInstructions(newInstructions);
 	};
 
 	const resetForm = () => {
 		setName("");
-		setLen(100);
-		setLlmCommands([""]);
+		setLinks([""]);
+		setScrapeInstructions([""]);
 		setValidationErrors([]);
 	};
 
 	const handleSubmit = (e: React.FormEvent) => {
 		setValidationErrors([]);
 
-		const validCommands = llmCommands.filter((cmd) => cmd.trim());
+		const validLinks = links.filter((link) => link.trim());
+		const validInstructions = scrapeInstructions.filter((inst) => inst.trim());
 
-		// Client-side validation
-		const validationResult = CreateGenerationSchema.safeParse({
+		const validationResult = CreateScrapeSchema.safeParse({
 			name: name.trim(),
-			len,
-			llmCommands: validCommands,
+			links: validLinks,
+			scrapeInstructions: validInstructions,
 		});
 
 		if (!validationResult.success) {
@@ -393,7 +392,6 @@ function CreateGenerationModal({
 		}
 	};
 
-	// Reset form when modal closes
 	useEffect(() => {
 		if (!isOpen) {
 			resetForm();
@@ -407,7 +405,7 @@ function CreateGenerationModal({
 			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
 				<div className="flex items-center justify-between p-6 border-b border-gray-200">
 					<h3 className="text-lg font-semibold text-gray-900">
-						Create New Generation
+						Create New Scrape
 					</h3>
 					<button
 						onClick={onClose}
@@ -422,8 +420,15 @@ function CreateGenerationModal({
 					<input type="hidden" name="_form" value="create" />
 					<input
 						type="hidden"
-						name="llmCommands"
-						value={JSON.stringify(llmCommands.filter((cmd) => cmd.trim()))}
+						name="links"
+						value={JSON.stringify(links.filter((link) => link.trim()))}
+					/>
+					<input
+						type="hidden"
+						name="scrapeInstructions"
+						value={JSON.stringify(
+							scrapeInstructions.filter((inst) => inst.trim())
+						)}
 					/>
 
 					<div className="p-6">
@@ -440,75 +445,86 @@ function CreateGenerationModal({
 						<div className="space-y-4">
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Name <span className="text-gray-500">(max 1000 chars)</span>
+									Name
 								</label>
 								<input
 									type="text"
 									name="name"
 									value={name}
-									onChange={(e) => setName(e.target.value.slice(0, 1000))}
+									onChange={(e) => setName(e.target.value.slice(0, 500))}
 									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									placeholder="e.g., Customer Data"
+									placeholder="e.g., News Articles"
 									required
 									disabled={isSubmitting}
-									maxLength={1000}
+									maxLength={500}
 								/>
 								<div className="text-xs text-gray-500 mt-1">
-									{name.length}/1000 characters
+									{name.length}/500 characters
 								</div>
 							</div>
 
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Number of Rows{" "}
-									<span className="text-gray-500">(max 1000)</span>
+									Links (max 5)
 								</label>
-								<input
-									type="number"
-									name="len"
-									value={len}
-									onChange={(e) =>
-										setLen(Math.min(1000, Math.max(1, Number(e.target.value))))
-									}
-									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									min="1"
-									max="1000"
-									required
-									disabled={isSubmitting}
-								/>
+								<div className="space-y-2">
+									{links.map((link, index) => (
+										<div key={index} className="flex gap-2">
+											<input
+												type="url"
+												value={link}
+												onChange={(e) => updateLink(index, e.target.value)}
+												className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+												placeholder="https://example.com"
+												disabled={isSubmitting}
+												maxLength={500}
+											/>
+											{links.length > 1 && (
+												<button
+													type="button"
+													onClick={() => removeLink(index)}
+													className="px-3 py-2 text-red-600 hover:text-red-800"
+													disabled={isSubmitting}
+												>
+													<X className="w-4 h-4" />
+												</button>
+											)}
+										</div>
+									))}
+									<button
+										type="button"
+										onClick={addLink}
+										className="text-blue-600 hover:text-blue-800 text-sm font-medium disabled:text-gray-400"
+										disabled={isSubmitting || links.length >= 5}
+									>
+										+ Add Link ({links.length}/5)
+									</button>
+								</div>
 							</div>
 
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									LLM Commands{" "}
-									<span className="text-gray-500">(max 10 commands)</span>
+									Scrape Instructions
 								</label>
 								<div className="space-y-2">
-									{llmCommands.map((command, index) => (
+									{scrapeInstructions.map((instruction, index) => (
 										<div key={index} className="space-y-1">
 											<div className="flex gap-2">
-												<div className="flex-1">
-													<input
-														type="text"
-														value={command}
-														onChange={(e) =>
-															updateCommand(index, e.target.value)
-														}
-														className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-														placeholder={`Command ${
-															index + 1
-														} (e.g., "Generate a first name")`}
-														disabled={isSubmitting}
-														maxLength={1000}
-													/>
-													<div className="text-xs text-gray-500 mt-1">
-														{command.length}/1000 characters
-													</div>
-												</div>
-												{llmCommands.length > 1 && (
+												<textarea
+													value={instruction}
+													onChange={(e) =>
+														updateInstruction(index, e.target.value)
+													}
+													className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+													placeholder="What to extract from the page"
+													rows={2}
+													disabled={isSubmitting}
+													maxLength={500}
+												/>
+												{scrapeInstructions.length > 1 && (
 													<button
 														type="button"
-														onClick={() => removeCommand(index)}
+														onClick={() => removeInstruction(index)}
 														className="px-3 py-2 text-red-600 hover:text-red-800 self-start"
 														disabled={isSubmitting}
 													>
@@ -516,15 +532,18 @@ function CreateGenerationModal({
 													</button>
 												)}
 											</div>
+											<div className="text-xs text-gray-500">
+												{instruction.length}/500 characters
+											</div>
 										</div>
 									))}
 									<button
 										type="button"
-										onClick={addCommand}
-										className="text-blue-600 hover:text-blue-800 text-sm font-medium disabled:text-gray-400"
-										disabled={isSubmitting || llmCommands.length >= 10}
+										onClick={addInstruction}
+										className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+										disabled={isSubmitting}
 									>
-										+ Add Command ({llmCommands.length}/10)
+										+ Add Instruction
 									</button>
 								</div>
 							</div>

@@ -1,13 +1,11 @@
 import { inngest } from "./client";
-import { InferenceClient } from "@huggingface/inference";
-
-interface ScrapeResult
-	extends Record<string, string | Record<string, string>> {}
+import { db } from "../db/db.server";
+import { scrapes } from "../db/schema";
+import { eq } from "drizzle-orm";
 
 interface ScrapeEvent {
 	data: {
-		links: string[];
-		extractionPrompt: Record<string, string>;
+		scrapeId: string;
 	};
 }
 
@@ -19,8 +17,6 @@ interface LLMResponse {
 	}>;
 }
 
-const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
-
 async function fetchUrlContent(url: string): Promise<string> {
 	try {
 		const fullUrl = url.startsWith("http") ? url : `https://${url}`;
@@ -29,7 +25,6 @@ async function fetchUrlContent(url: string): Promise<string> {
 			return `Failed to fetch ${fullUrl}`;
 		}
 		const html = await response.text();
-		// Basic HTML stripping
 		return html
 			.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
 			.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -44,25 +39,17 @@ async function fetchUrlContent(url: string): Promise<string> {
 
 async function extractInfoWithLLM(
 	text: string,
-	extractionPrompt: Record<string, string>
-): Promise<ScrapeResult | null> {
-	// Construct a dynamic prompt based on the extractionPrompt keys
-	const promptParts: string[] = [];
-	for (const key in extractionPrompt) {
-		if (Object.prototype.hasOwnProperty.call(extractionPrompt, key)) {
-			promptParts.push(`"${key}": "${extractionPrompt[key]}"`);
-		}
-	}
-
-	const prompt = `Given the following text, extract the information as a JSON object. For each key, if the information is not found or not applicable, use "N/A" for string values. If a key from the 'Extraction structure' cannot be found, omit it from the JSON. DO NOT include any explanatory text, comments, or additional characters outside of the JSON object itself. The output MUST be a valid JSON object.
+	scrapeInstructions: string[]
+): Promise<string[] | null> {
+	const prompt = `Given the following text, extract the information based on these instructions and return ONLY an array of strings in JSON format. Each instruction should produce one string result. If information cannot be found, use "N/A".
 
 Text:
 ${text}
 
-Extraction structure (use these keys exactly):
-{
-${promptParts.map((p) => `  ${p}`).join(",\n")}
-}
+Instructions:
+${scrapeInstructions.map((inst, i) => `${i + 1}. ${inst}`).join("\n")}
+
+Return format: ["result1", "result2", ...]
 
 JSON Output:`;
 
@@ -77,7 +64,7 @@ JSON Output:`;
 				},
 				body: JSON.stringify({
 					messages: [{ role: "user", content: prompt }],
-					max_tokens: 1_000_000,
+					max_tokens: 1000,
 					temperature: 0.1,
 				}),
 			}
@@ -91,9 +78,9 @@ JSON Output:`;
 		const data: LLMResponse = await response.json();
 		let llmOutput = data.choices[0].message.content;
 
-		const jsonMatch = llmOutput.match(/\{[\s\S]*\}/);
+		const jsonMatch = llmOutput.match(/\[[\s\S]*\]/);
 		if (!jsonMatch) {
-			console.error("No JSON object found in LLM output:", llmOutput);
+			console.error("No JSON array found in LLM output:", llmOutput);
 			return null;
 		}
 
@@ -101,7 +88,10 @@ JSON Output:`;
 
 		try {
 			const parsedOutput = JSON.parse(jsonString);
-			return parsedOutput as ScrapeResult;
+			if (Array.isArray(parsedOutput)) {
+				return parsedOutput.map((item) => String(item));
+			}
+			return null;
 		} catch (jsonError) {
 			console.error(
 				"Failed to parse LLM output as JSON:",
@@ -121,32 +111,87 @@ export const llmScraper = inngest.createFunction(
 	{ id: "llm-scraper" },
 	{ event: "ai/llm.scrape" },
 	async ({ event, step }) => {
-		const { links, extractionPrompt } = event.data;
-		const scrapedResults: ScrapeResult[] = [];
+		const { scrapeId } = event.data;
 
-		for (const link of links) {
-			const content = await step.run(`fetch-content-${link}`, () =>
-				fetchUrlContent(link)
-			);
+		try {
+			const scrapeRecord = await step.run("fetch-scrape-record", async () => {
+				const records = await db
+					.select()
+					.from(scrapes)
+					.where(eq(scrapes.id, scrapeId));
 
-			if (
-				content.startsWith("Failed to fetch") ||
-				content.startsWith("Error fetching")
-			) {
-				console.warn(
-					`Skipping extraction for ${link} due to content fetch error.`
+				if (records.length === 0) {
+					throw new Error(`Scrape record with ID ${scrapeId} not found`);
+				}
+
+				return records[0];
+			});
+
+			const { links, scrape: scrapeInstructions } = scrapeRecord.data as {
+				links: string[];
+				scrape: string[];
+				data: string[][];
+			};
+
+			const scrapedResults: string[][] = [];
+
+			for (const link of links) {
+				const content = await step.run(`fetch-content-${link}`, () =>
+					fetchUrlContent(link)
 				);
-				continue;
+
+				if (
+					content.startsWith("Failed to fetch") ||
+					content.startsWith("Error fetching")
+				) {
+					console.warn(
+						`Skipping extraction for ${link} due to content fetch error.`
+					);
+					scrapedResults.push(
+						scrapeInstructions.map(() => "Error fetching content")
+					);
+					continue;
+				}
+
+				const extractedInfo = await step.run(`extract-info-${link}`, () =>
+					extractInfoWithLLM(content, scrapeInstructions)
+				);
+
+				if (extractedInfo) {
+					scrapedResults.push(extractedInfo);
+				} else {
+					scrapedResults.push(scrapeInstructions.map(() => "N/A"));
+				}
 			}
 
-			const extractedInfo = await step.run(`extract-info-${link}`, () =>
-				extractInfoWithLLM(content, extractionPrompt)
-			);
+			await step.run("update-scrape-record", async () => {
+				await db
+					.update(scrapes)
+					.set({
+						status: "finished",
+						data: {
+							links,
+							scrape: scrapeInstructions,
+							data: scrapedResults,
+						},
+					})
+					.where(eq(scrapes.id, scrapeId));
+			});
 
-			if (extractedInfo) {
-				scrapedResults.push(extractedInfo);
-			}
+			return { status: "finished", results: scrapedResults };
+		} catch (error) {
+			console.error("Error in scraper function:", error);
+
+			await step.run("update-scrape-error", async () => {
+				await db
+					.update(scrapes)
+					.set({
+						status: "error",
+					})
+					.where(eq(scrapes.id, scrapeId));
+			});
+
+			throw error;
 		}
-		return { status: "finished", results: scrapedResults };
 	}
 );

@@ -64,6 +64,7 @@ export const rssFeed = pgTable("rssFeed", {
 	link: text("link"),
 	summray: text("summray"),
 	status: statusEnum("status").notNull().default("running"),
+	updatedAt: timestamp("updated_at").defaultNow().notNull(),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
