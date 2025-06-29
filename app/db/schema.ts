@@ -44,6 +44,17 @@ export const analysis = pgTable("analysis", {
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+export const scrapes = pgTable("scrapes", {
+	id: uuid("id").defaultRandom().primaryKey(),
+	userId: text("user_id")
+		.notNull()
+		.references(() => users.id, { onDelete: "cascade" }),
+	name: text("name"),
+	data: jsonb("data").notNull().default('{"links": [],"scrape":[],"data":[]}'),
+	status: statusEnum("status").notNull().default("running"),
+	createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export const rssFeed = pgTable("rssFeed", {
 	id: uuid("id").defaultRandom().primaryKey(),
 	userId: text("user_id")
@@ -52,17 +63,6 @@ export const rssFeed = pgTable("rssFeed", {
 	name: text("name"),
 	link: text("link"),
 	summray: text("summray"),
-	status: statusEnum("status").notNull().default("running"),
-	createdAt: timestamp("created_at").defaultNow().notNull(),
-});
-
-export const scrapes = pgTable("scrapes", {
-	id: uuid("id").defaultRandom().primaryKey(),
-	userId: text("user_id")
-		.notNull()
-		.references(() => users.id, { onDelete: "cascade" }),
-	name: text("name"),
-	data: jsonb("data").notNull().default('{"links": [],"scrape":{}}'),
 	status: statusEnum("status").notNull().default("running"),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });
