@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { X, Plus, Download } from "lucide-react";
+import { X, Plus, Search } from "lucide-react";
 import {
 	Form,
 	useLoaderData,
@@ -15,55 +15,40 @@ import {
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "~/db/db.server";
-import { generations, users } from "~/db/schema";
+import { rssFeed, users } from "~/db/schema";
 import { inngest } from "~/inngest/client";
 import { getAuth, rootAuthLoader } from "@clerk/remix/ssr.server";
 
-type GenerationStatus = "error" | "running" | "finished";
-
-type GenerationData = {
-	columns: string[];
-	llm_commands: string[];
-	rows: Record<string, any>[];
-};
-
-type Generation = {
+type RssFeedData = {
 	id: string;
 	userId: string;
 	name: string | null;
-	len: number | null;
-	status: GenerationStatus;
-	data: GenerationData;
+	link: string | null;
+	summray: string | null;
+	status: "error" | "running" | "finished";
+	updatedAt: Date;
 	createdAt: Date;
 };
 
-const CreateGenerationSchema = z.object({
+const CreateRssFeedSchema = z.object({
 	name: z
 		.string()
 		.min(1, "Name is required")
-		.max(500, "Name must be 500 characters or less"),
-	len: z
-		.number()
-		.min(1, "Must generate at least 1 row")
-		.max(1000, "Maximum 1000 rows allowed"),
-	llmCommands: z
-		.array(
-			z
-				.string()
-				.min(1, "Command cannot be empty")
-				.max(1000, "Command must be 1000 characters or less")
-		)
-		.min(1, "At least one command is required")
-		.max(10, "Maximum 10 commands allowed"),
+		.max(100, "Name must be 100 characters or less"),
+	link: z
+		.string()
+		.min(1, "Link is required")
+		.max(500, "Link must be 500 characters or less")
+		.url("Must be a valid URL"),
 });
 
-// Loader function - fetch generations from DB based on authenticated user
+// Loader function - fetch RSS feeds from DB based on authenticated user
 export const loader = async (args: LoaderFunctionArgs) => {
 	const authData = await rootAuthLoader(args);
 	const { userId } = await getAuth(args);
 
 	if (!userId) {
-		return json({ generations: [] });
+		return json({ rssFeeds: [] });
 	}
 
 	try {
@@ -77,28 +62,28 @@ export const loader = async (args: LoaderFunctionArgs) => {
 			await db.insert(users).values({ id: userId });
 		}
 
-		// Fetch all generations for the authenticated user
-		const userGenerations = await db
+		// Fetch all RSS feeds for the authenticated user
+		const userRssFeeds = await db
 			.select()
-			.from(generations)
-			.where(eq(generations.userId, userId))
-			.orderBy(generations.createdAt); // Order by creation date
+			.from(rssFeed)
+			.where(eq(rssFeed.userId, userId))
+			.orderBy(rssFeed.updatedAt); // Order by update date
 
 		return json({
-			generations: userGenerations,
+			rssFeeds: userRssFeeds,
 			authData,
 		});
 	} catch (error) {
-		console.error("Failed to fetch generations:", error);
+		console.error("Failed to fetch RSS feeds:", error);
 		return json({
-			generations: [],
+			rssFeeds: [],
 			authData,
-			error: "Failed to fetch generations",
+			error: "Failed to fetch RSS feeds",
 		});
 	}
 };
 
-// Action function - handle generation creation
+// Action function - handle RSS feed creation
 export async function action(args: ActionFunctionArgs) {
 	const formData = await args.request.formData();
 	const formType = formData.get("_form") as string;
@@ -115,33 +100,12 @@ export async function action(args: ActionFunctionArgs) {
 
 	if (formType === "create") {
 		const name = formData.get("name") as string;
-		const lenString = formData.get("len") as string;
-		const llmCommandsJson = formData.get("llmCommands") as string;
-
-		// Parse and validate input data
-		let llmCommands;
-		try {
-			llmCommands = JSON.parse(llmCommandsJson);
-		} catch {
-			return json(
-				{ success: false, error: "Invalid commands format" },
-				{ status: 400 }
-			);
-		}
-
-		const len = parseInt(lenString);
-		if (isNaN(len)) {
-			return json(
-				{ success: false, error: "Invalid number of rows" },
-				{ status: 400 }
-			);
-		}
+		const link = formData.get("link") as string;
 
 		// Validate using Zod schema
-		const validationResult = CreateGenerationSchema.safeParse({
+		const validationResult = CreateRssFeedSchema.safeParse({
 			name,
-			len,
-			llmCommands,
+			link,
 		});
 
 		if (!validationResult.success) {
@@ -158,37 +122,33 @@ export async function action(args: ActionFunctionArgs) {
 		const validatedData = validationResult.data;
 
 		try {
-			// Create new generation record in database
-			const newGeneration = await db
-				.insert(generations)
+			// Create new RSS feed record in database
+			const newRssFeed = await db
+				.insert(rssFeed)
 				.values({
 					userId,
 					name: validatedData.name.trim(),
-					len: validatedData.len,
+					link: validatedData.link,
 					status: "running",
-					data: {
-						columns: [],
-						llm_commands: validatedData.llmCommands,
-						rows: [],
-					},
+					summray: null,
 				})
-				.returning({ id: generations.id });
+				.returning({ id: rssFeed.id });
 
-			const generationId = newGeneration[0].id;
+			const rssFeedId = newRssFeed[0].id;
 
 			// Send event to Inngest
 			await inngest.send({
-				name: "ai/generate.tabular.data",
+				name: "ai/llm.rss",
 				data: {
-					generationId,
+					rssFeedId,
 				},
 			});
 
-			return redirect("/dashboard/generate");
+			return redirect("/dashboard/rss");
 		} catch (error) {
-			console.error("Failed to create generation:", error);
+			console.error("Failed to create RSS feed:", error);
 			return json(
-				{ success: false, error: "Failed to create generation" },
+				{ success: false, error: "Failed to create RSS feed" },
 				{ status: 500 }
 			);
 		}
@@ -197,38 +157,33 @@ export async function action(args: ActionFunctionArgs) {
 	return json({ success: false, error: "Invalid form type" }, { status: 400 });
 }
 
-export default function GenerationDashboard() {
+export default function RssFeedDashboard() {
 	const revalidator = useRevalidator();
-
-	useEffect(() => {
-		const interval = setInterval(() => {
-			revalidator.revalidate();
-		}, 5000);
-
-		return () => clearInterval(interval);
-	}, []);
-
-	const { generations } = useLoaderData<typeof loader>();
+	const { rssFeeds } = useLoaderData<typeof loader>();
 	const [showCreateModal, setShowCreateModal] = useState(false);
+	const [searchQuery, setSearchQuery] = useState("");
 	const navigation = useNavigation();
 
 	const isSubmitting =
 		navigation.state === "submitting" &&
 		navigation.formData?.get("_form") === "create";
 
-	const handleDownloadJson = (generation: Generation) => {
-		const jsonContent = JSON.stringify(generation.data, null, 2);
-		const blob = new Blob([jsonContent], { type: "application/json" });
-		const url = URL.createObjectURL(blob);
+	// Filter RSS feeds based on search query
+	const filteredRssFeeds = rssFeeds.filter(
+		(feed: RssFeedData) =>
+			feed.summray?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+			feed.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+			feed.link?.toLowerCase().includes(searchQuery.toLowerCase())
+	);
 
-		const a = document.createElement("a");
-		a.href = url;
-		a.download = `${generation.name || "generation"}_${generation.id}.json`;
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
-	};
+	// Auto-revalidate every 30 seconds
+	useEffect(() => {
+		const interval = setInterval(() => {
+			revalidator.revalidate();
+		}, 30000);
+
+		return () => clearInterval(interval);
+	}, []);
 
 	useEffect(() => {
 		if (navigation.state === "idle" && !isSubmitting) {
@@ -236,94 +191,97 @@ export default function GenerationDashboard() {
 		}
 	}, [navigation.state, isSubmitting]);
 
+	const formatDate = (date: Date | string) => {
+		const d = new Date(date);
+		return d.toLocaleDateString() + " " + d.toLocaleTimeString();
+	};
+
 	return (
 		<div className="max-w-4xl mx-auto p-6">
 			<div className="bg-white rounded-lg shadow-sm border border-gray-200">
 				<div className="flex items-center justify-between p-6 border-b border-gray-200">
 					<h2 className="text-xl font-semibold text-gray-900">
-						Data Generations
+						RSS Feed Summaries
 					</h2>
 					<button
 						onClick={() => setShowCreateModal(true)}
 						className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700"
 					>
 						<Plus className="w-4 h-4 mr-2" />
-						New Generation
+						Add RSS Feed
 					</button>
 				</div>
 
-				<div className="overflow-x-auto">
-					<table className="w-full">
-						<thead className="bg-gray-50">
-							<tr>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Name
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Rows Generated
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Status
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Download
-								</th>
-							</tr>
-						</thead>
-						<tbody className="bg-white divide-y divide-gray-200">
-							{generations.length === 0 ? (
-								<tr>
-									<td
-										colSpan={4}
-										className="px-6 py-12 text-center text-gray-500"
-									>
-										No generations found. Create your first one to get started.
-									</td>
-								</tr>
-							) : (
-								generations.map((generation: any) => (
-									<tr key={generation.id} className="hover:bg-gray-50">
-										<td className="px-6 py-4 whitespace-nowrap">
-											<div className="text-sm font-medium text-gray-900">
-												{generation.name ||
-													`Generation ${generation.id.slice(0, 8)}`}
-											</div>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-											{generation.data?.rows?.length || 0}
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap">
+				{/* Search Bar */}
+				<div className="p-6 border-b border-gray-200">
+					<div className="relative">
+						<Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+						<input
+							type="text"
+							placeholder="Search summaries..."
+							value={searchQuery}
+							onChange={(e) => setSearchQuery(e.target.value)}
+							className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+						/>
+					</div>
+				</div>
+
+				{/* RSS Feed List */}
+				<div className="divide-y divide-gray-200">
+					{filteredRssFeeds.length === 0 ? (
+						<div className="px-6 py-12 text-center text-gray-500">
+							{searchQuery
+								? "No matching RSS feeds found."
+								: "No RSS feeds found. Add your first one to get started."}
+						</div>
+					) : (
+						filteredRssFeeds.map((feed: RssFeedData) => (
+							<div key={feed.id} className="p-6 hover:bg-gray-50">
+								<div className="flex items-start justify-between">
+									<div className="flex-1">
+										<div className="flex items-center gap-3 mb-2">
+											<h3 className="text-lg font-medium text-gray-900">
+												{feed.name || "Untitled Feed"}
+											</h3>
 											<span
 												className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-													generation.status === "finished"
+													feed.status === "finished"
 														? "bg-green-100 text-green-800"
-														: generation.status === "error"
+														: feed.status === "error"
 														? "bg-red-100 text-red-800"
 														: "bg-blue-100 text-blue-800"
 												}`}
 											>
-												{generation.status}
+												{feed.status}
 											</span>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-											<button
-												onClick={() => handleDownloadJson(generation)}
-												className="inline-flex items-center text-blue-600 hover:text-blue-800 disabled:text-gray-400"
-												disabled={!generation.data?.rows?.length}
+										</div>
+										<p className="text-sm text-gray-500 mb-3">
+											<a
+												href={feed.link || "#"}
+												target="_blank"
+												rel="noopener noreferrer"
+												className="hover:text-blue-600"
 											>
-												<Download className="w-4 h-4 mr-1" />
-												JSON
-											</button>
-										</td>
-									</tr>
-								))
-							)}
-						</tbody>
-					</table>
+												{feed.link}
+											</a>
+										</p>
+										{feed.summray && (
+											<p className="text-gray-700 leading-relaxed">
+												{feed.summray}
+											</p>
+										)}
+									</div>
+								</div>
+								<div className="mt-4 text-xs text-gray-500">
+									Updated: {formatDate(feed.updatedAt)}
+								</div>
+							</div>
+						))
+					)}
 				</div>
 			</div>
 
-			<CreateGenerationModal
+			<CreateRssFeedModal
 				isOpen={showCreateModal}
 				onClose={() => setShowCreateModal(false)}
 				isSubmitting={isSubmitting}
@@ -332,7 +290,7 @@ export default function GenerationDashboard() {
 	);
 }
 
-function CreateGenerationModal({
+function CreateRssFeedModal({
 	isOpen,
 	onClose,
 	isSubmitting,
@@ -342,45 +300,22 @@ function CreateGenerationModal({
 	isSubmitting: boolean;
 }) {
 	const [name, setName] = useState("");
-	const [len, setLen] = useState(100);
-	const [llmCommands, setLlmCommands] = useState([""]);
+	const [link, setLink] = useState("");
 	const [validationErrors, setValidationErrors] = useState<string[]>([]);
-
-	const addCommand = () => {
-		if (llmCommands.length < 10) {
-			setLlmCommands([...llmCommands, ""]);
-		}
-	};
-
-	const removeCommand = (index: number) => {
-		if (llmCommands.length > 1) {
-			setLlmCommands(llmCommands.filter((_, i) => i !== index));
-		}
-	};
-
-	const updateCommand = (index: number, value: string) => {
-		const newCommands = [...llmCommands];
-		newCommands[index] = value.slice(0, 1000); // Limit to 1000 characters
-		setLlmCommands(newCommands);
-	};
 
 	const resetForm = () => {
 		setName("");
-		setLen(100);
-		setLlmCommands([""]);
+		setLink("");
 		setValidationErrors([]);
 	};
 
 	const handleSubmit = (e: React.FormEvent) => {
 		setValidationErrors([]);
 
-		const validCommands = llmCommands.filter((cmd) => cmd.trim());
-
 		// Client-side validation
-		const validationResult = CreateGenerationSchema.safeParse({
+		const validationResult = CreateRssFeedSchema.safeParse({
 			name: name.trim(),
-			len,
-			llmCommands: validCommands,
+			link: link.trim(),
 		});
 
 		if (!validationResult.success) {
@@ -404,11 +339,9 @@ function CreateGenerationModal({
 
 	return (
 		<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
+			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
 				<div className="flex items-center justify-between p-6 border-b border-gray-200">
-					<h3 className="text-lg font-semibold text-gray-900">
-						Create New Generation
-					</h3>
+					<h3 className="text-lg font-semibold text-gray-900">Add RSS Feed</h3>
 					<button
 						onClick={onClose}
 						className="text-gray-400 hover:text-gray-600"
@@ -420,11 +353,6 @@ function CreateGenerationModal({
 
 				<Form method="post" onSubmit={handleSubmit}>
 					<input type="hidden" name="_form" value="create" />
-					<input
-						type="hidden"
-						name="llmCommands"
-						value={JSON.stringify(llmCommands.filter((cmd) => cmd.trim()))}
-					/>
 
 					<div className="p-6">
 						{validationErrors.length > 0 && (
@@ -440,92 +368,42 @@ function CreateGenerationModal({
 						<div className="space-y-4">
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Name <span className="text-gray-500">(max 1000 chars)</span>
+									Name <span className="text-gray-500">(max 100 chars)</span>
 								</label>
 								<input
 									type="text"
 									name="name"
 									value={name}
-									onChange={(e) => setName(e.target.value.slice(0, 1000))}
+									onChange={(e) => setName(e.target.value.slice(0, 100))}
 									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									placeholder="e.g., Customer Data"
+									placeholder="e.g., Tech News RSS"
 									required
 									disabled={isSubmitting}
-									maxLength={1000}
+									maxLength={100}
 								/>
 								<div className="text-xs text-gray-500 mt-1">
-									{name.length}/1000 characters
+									{name.length}/100 characters
 								</div>
 							</div>
 
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Number of Rows{" "}
-									<span className="text-gray-500">(max 1000)</span>
+									RSS Feed URL{" "}
+									<span className="text-gray-500">(max 500 chars)</span>
 								</label>
 								<input
-									type="number"
-									name="len"
-									value={len}
-									onChange={(e) =>
-										setLen(Math.min(1000, Math.max(1, Number(e.target.value))))
-									}
+									type="url"
+									name="link"
+									value={link}
+									onChange={(e) => setLink(e.target.value.slice(0, 500))}
 									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-									min="1"
-									max="1000"
+									placeholder="https://example.com/rss"
 									required
 									disabled={isSubmitting}
+									maxLength={500}
 								/>
-							</div>
-
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">
-									LLM Commands{" "}
-									<span className="text-gray-500">(max 10 commands)</span>
-								</label>
-								<div className="space-y-2">
-									{llmCommands.map((command, index) => (
-										<div key={index} className="space-y-1">
-											<div className="flex gap-2">
-												<div className="flex-1">
-													<input
-														type="text"
-														value={command}
-														onChange={(e) =>
-															updateCommand(index, e.target.value)
-														}
-														className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-														placeholder={`Command ${
-															index + 1
-														} (e.g., "Generate a first name")`}
-														disabled={isSubmitting}
-														maxLength={1000}
-													/>
-													<div className="text-xs text-gray-500 mt-1">
-														{command.length}/1000 characters
-													</div>
-												</div>
-												{llmCommands.length > 1 && (
-													<button
-														type="button"
-														onClick={() => removeCommand(index)}
-														className="px-3 py-2 text-red-600 hover:text-red-800 self-start"
-														disabled={isSubmitting}
-													>
-														<X className="w-4 h-4" />
-													</button>
-												)}
-											</div>
-										</div>
-									))}
-									<button
-										type="button"
-										onClick={addCommand}
-										className="text-blue-600 hover:text-blue-800 text-sm font-medium disabled:text-gray-400"
-										disabled={isSubmitting || llmCommands.length >= 10}
-									>
-										+ Add Command ({llmCommands.length}/10)
-									</button>
+								<div className="text-xs text-gray-500 mt-1">
+									{link.length}/500 characters
 								</div>
 							</div>
 						</div>
@@ -544,7 +422,7 @@ function CreateGenerationModal({
 								disabled={isSubmitting}
 								className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
 							>
-								{isSubmitting ? "Creating..." : "Create"}
+								{isSubmitting ? "Adding..." : "Add Feed"}
 							</button>
 						</div>
 					</div>
