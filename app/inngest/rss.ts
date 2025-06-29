@@ -1,15 +1,6 @@
 import { inngest } from "./client";
 import { InferenceClient } from "@huggingface/inference";
 
-interface ScrapeResult
-	extends Record<string, string | Record<string, string>> {}
-
-interface ScrapeEvent {
-	data: {
-		links: string[];
-	};
-}
-
 interface LLMResponse {
 	choices: Array<{
 		message: {
@@ -82,32 +73,26 @@ export const llmRSS = inngest.createFunction(
 	{ id: "rss-summarizer" },
 	{ event: "ai/llm.rss" },
 	async ({ event, step }) => {
-		const { links } = event.data;
-		const summaries: string[] = [];
+		const { link } = event.data;
 
-		for (const link of links) {
-			const content = await step.run(`fetch-content-${link}`, () =>
-				fetchUrlContent(link)
+		const content = await step.run(`fetch-content-${link}`, () =>
+			fetchUrlContent(link)
+		);
+
+		if (
+			content.startsWith("Failed to fetch") ||
+			content.startsWith("Error fetching")
+		) {
+			console.warn(
+				`Skipping summarization for ${link} due to content fetch error.`
 			);
-
-			if (
-				content.startsWith("Failed to fetch") ||
-				content.startsWith("Error fetching")
-			) {
-				console.warn(
-					`Skipping summarization for ${link} due to content fetch error.`
-				);
-				continue;
-			}
-
-			const summary = await step.run(`summarize-content-${link}`, () =>
-				summarizeWithLLM(content)
-			);
-
-			if (summary) {
-				summaries.push(summary);
-			}
+			// update the status in db with error here !
 		}
-		return { status: "finished", summaries };
+
+		const summary = await step.run(`summarize-content-${link}`, () =>
+			summarizeWithLLM(content)
+		);
+
+		return { status: "finished", summary };
 	}
 );

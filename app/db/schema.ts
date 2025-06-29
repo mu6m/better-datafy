@@ -50,7 +50,8 @@ export const rssFeed = pgTable("rssFeed", {
 		.notNull()
 		.references(() => users.id, { onDelete: "cascade" }),
 	name: text("name"),
-	data: jsonb("data").notNull().default('{"links": []}'),
+	link: text("link"),
+	summray: text("summray"),
 	status: statusEnum("status").notNull().default("running"),
 	createdAt: timestamp("created_at").defaultNow().notNull(),
 });
