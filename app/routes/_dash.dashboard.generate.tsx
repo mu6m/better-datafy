@@ -13,6 +13,7 @@ import {
 	type LoaderFunctionArgs,
 } from "@remix-run/node";
 import { eq } from "drizzle-orm";
+import { z } from "zod";
 import { db } from "~/db/db.server";
 import { generations, users } from "~/db/schema";
 import { inngest } from "~/inngest/client";
@@ -35,6 +36,26 @@ type Generation = {
 	data: GenerationData;
 	createdAt: Date;
 };
+
+const CreateGenerationSchema = z.object({
+	name: z
+		.string()
+		.min(1, "Name is required")
+		.max(500, "Name must be 500 characters or less"),
+	len: z
+		.number()
+		.min(1, "Must generate at least 1 row")
+		.max(1000, "Maximum 1000 rows allowed"),
+	llmCommands: z
+		.array(
+			z
+				.string()
+				.min(1, "Command cannot be empty")
+				.max(1000, "Command must be 1000 characters or less")
+		)
+		.min(1, "At least one command is required")
+		.max(10, "Maximum 10 commands allowed"),
+});
 
 // Loader function - fetch generations from DB based on authenticated user
 export const loader = async (args: LoaderFunctionArgs) => {
@@ -94,16 +115,10 @@ export async function action(args: ActionFunctionArgs) {
 
 	if (formType === "create") {
 		const name = formData.get("name") as string;
-		const len = parseInt(formData.get("len") as string);
+		const lenString = formData.get("len") as string;
 		const llmCommandsJson = formData.get("llmCommands") as string;
 
-		if (!name?.trim() || !llmCommandsJson) {
-			return json(
-				{ success: false, error: "Name and commands are required" },
-				{ status: 400 }
-			);
-		}
-
+		// Parse and validate input data
 		let llmCommands;
 		try {
 			llmCommands = JSON.parse(llmCommandsJson);
@@ -114,18 +129,46 @@ export async function action(args: ActionFunctionArgs) {
 			);
 		}
 
+		const len = parseInt(lenString);
+		if (isNaN(len)) {
+			return json(
+				{ success: false, error: "Invalid number of rows" },
+				{ status: 400 }
+			);
+		}
+
+		// Validate using Zod schema
+		const validationResult = CreateGenerationSchema.safeParse({
+			name,
+			len,
+			llmCommands,
+		});
+
+		if (!validationResult.success) {
+			const errorMessages = validationResult.error.errors
+				.map((err) => `${err.path.join(".")}: ${err.message}`)
+				.join(", ");
+
+			return json(
+				{ success: false, error: `Validation failed: ${errorMessages}` },
+				{ status: 400 }
+			);
+		}
+
+		const validatedData = validationResult.data;
+
 		try {
 			// Create new generation record in database
 			const newGeneration = await db
 				.insert(generations)
 				.values({
 					userId,
-					name: name.trim(),
-					len,
+					name: validatedData.name.trim(),
+					len: validatedData.len,
 					status: "running",
 					data: {
 						columns: [],
-						llm_commands: llmCommands,
+						llm_commands: validatedData.llmCommands,
 						rows: [],
 					},
 				})
@@ -238,7 +281,7 @@ export default function GenerationDashboard() {
 									</td>
 								</tr>
 							) : (
-								generations.map((generation) => (
+								generations.map((generation: any) => (
 									<tr key={generation.id} className="hover:bg-gray-50">
 										<td className="px-6 py-4 whitespace-nowrap">
 											<div className="text-sm font-medium text-gray-900">
@@ -301,9 +344,12 @@ function CreateGenerationModal({
 	const [name, setName] = useState("");
 	const [len, setLen] = useState(100);
 	const [llmCommands, setLlmCommands] = useState([""]);
+	const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
 	const addCommand = () => {
-		setLlmCommands([...llmCommands, ""]);
+		if (llmCommands.length < 10) {
+			setLlmCommands([...llmCommands, ""]);
+		}
 	};
 
 	const removeCommand = (index: number) => {
@@ -314,7 +360,7 @@ function CreateGenerationModal({
 
 	const updateCommand = (index: number, value: string) => {
 		const newCommands = [...llmCommands];
-		newCommands[index] = value;
+		newCommands[index] = value.slice(0, 1000); // Limit to 1000 characters
 		setLlmCommands(newCommands);
 	};
 
@@ -322,13 +368,27 @@ function CreateGenerationModal({
 		setName("");
 		setLen(100);
 		setLlmCommands([""]);
+		setValidationErrors([]);
 	};
 
 	const handleSubmit = (e: React.FormEvent) => {
+		setValidationErrors([]);
+
 		const validCommands = llmCommands.filter((cmd) => cmd.trim());
-		if (!name.trim() || validCommands.length === 0) {
+
+		// Client-side validation
+		const validationResult = CreateGenerationSchema.safeParse({
+			name: name.trim(),
+			len,
+			llmCommands: validCommands,
+		});
+
+		if (!validationResult.success) {
 			e.preventDefault();
-			alert("Please provide a name and at least one command.");
+			const errorMessages = validationResult.error.errors.map(
+				(err) => `${err.path.join(".")}: ${err.message}`
+			);
+			setValidationErrors(errorMessages);
 			return;
 		}
 	};
@@ -344,7 +404,7 @@ function CreateGenerationModal({
 
 	return (
 		<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+			<div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
 				<div className="flex items-center justify-between p-6 border-b border-gray-200">
 					<h3 className="text-lg font-semibold text-gray-900">
 						Create New Generation
@@ -367,35 +427,52 @@ function CreateGenerationModal({
 					/>
 
 					<div className="p-6">
+						{validationErrors.length > 0 && (
+							<div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+								<div className="text-sm text-red-600">
+									{validationErrors.map((error, index) => (
+										<div key={index}>• {error}</div>
+									))}
+								</div>
+							</div>
+						)}
+
 						<div className="space-y-4">
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Name
+									Name <span className="text-gray-500">(max 1000 chars)</span>
 								</label>
 								<input
 									type="text"
 									name="name"
 									value={name}
-									onChange={(e) => setName(e.target.value)}
+									onChange={(e) => setName(e.target.value.slice(0, 1000))}
 									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
 									placeholder="e.g., Customer Data"
 									required
 									disabled={isSubmitting}
+									maxLength={1000}
 								/>
+								<div className="text-xs text-gray-500 mt-1">
+									{name.length}/1000 characters
+								</div>
 							</div>
 
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									Number of Rows
+									Number of Rows{" "}
+									<span className="text-gray-500">(max 1000)</span>
 								</label>
 								<input
 									type="number"
 									name="len"
 									value={len}
-									onChange={(e) => setLen(Number(e.target.value))}
+									onChange={(e) =>
+										setLen(Math.min(1000, Math.max(1, Number(e.target.value))))
+									}
 									className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
 									min="1"
-									max="10000"
+									max="1000"
 									required
 									disabled={isSubmitting}
 								/>
@@ -403,40 +480,51 @@ function CreateGenerationModal({
 
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-1">
-									LLM Commands
+									LLM Commands{" "}
+									<span className="text-gray-500">(max 10 commands)</span>
 								</label>
 								<div className="space-y-2">
 									{llmCommands.map((command, index) => (
-										<div key={index} className="flex gap-2">
-											<input
-												type="text"
-												value={command}
-												onChange={(e) => updateCommand(index, e.target.value)}
-												className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-												placeholder={`Command ${
-													index + 1
-												} (e.g., "Generate a first name")`}
-												disabled={isSubmitting}
-											/>
-											{llmCommands.length > 1 && (
-												<button
-													type="button"
-													onClick={() => removeCommand(index)}
-													className="px-3 py-2 text-red-600 hover:text-red-800"
-													disabled={isSubmitting}
-												>
-													<X className="w-4 h-4" />
-												</button>
-											)}
+										<div key={index} className="space-y-1">
+											<div className="flex gap-2">
+												<div className="flex-1">
+													<input
+														type="text"
+														value={command}
+														onChange={(e) =>
+															updateCommand(index, e.target.value)
+														}
+														className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+														placeholder={`Command ${
+															index + 1
+														} (e.g., "Generate a first name")`}
+														disabled={isSubmitting}
+														maxLength={1000}
+													/>
+													<div className="text-xs text-gray-500 mt-1">
+														{command.length}/1000 characters
+													</div>
+												</div>
+												{llmCommands.length > 1 && (
+													<button
+														type="button"
+														onClick={() => removeCommand(index)}
+														className="px-3 py-2 text-red-600 hover:text-red-800 self-start"
+														disabled={isSubmitting}
+													>
+														<X className="w-4 h-4" />
+													</button>
+												)}
+											</div>
 										</div>
 									))}
 									<button
 										type="button"
 										onClick={addCommand}
-										className="text-blue-600 hover:text-blue-800 text-sm font-medium"
-										disabled={isSubmitting}
+										className="text-blue-600 hover:text-blue-800 text-sm font-medium disabled:text-gray-400"
+										disabled={isSubmitting || llmCommands.length >= 10}
 									>
-										+ Add Command
+										+ Add Command ({llmCommands.length}/10)
 									</button>
 								</div>
 							</div>
