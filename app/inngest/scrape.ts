@@ -2,19 +2,14 @@ import { inngest } from "./client";
 import { db } from "../db/db.server";
 import { scrapes } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { HfInference } from "@huggingface/inference";
+
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 
 interface ScrapeEvent {
 	data: {
 		scrapeId: string;
 	};
-}
-
-interface LLMResponse {
-	choices: Array<{
-		message: {
-			content: string;
-		};
-	}>;
 }
 
 async function fetchUrlContent(url: string): Promise<string> {
@@ -54,29 +49,15 @@ Return format: ["result1", "result2", ...]
 JSON Output:`;
 
 	try {
-		const response = await fetch(
-			"https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1/v1/chat/completions",
-			{
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					messages: [{ role: "user", content: prompt }],
-					max_tokens: 1000,
-					temperature: 0.1,
-				}),
-			}
-		);
+		const response = await hf.chatCompletion({
+			model: "meta-llama/Llama-3.1-8B-Instruct",
+			messages: [{ role: "user", content: prompt }],
+			max_tokens: 1000,
+			temperature: 0.1,
+			provider: "auto",
+		});
 
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`API error: ${response.status}: ${errorText}`);
-		}
-
-		const data: LLMResponse = await response.json();
-		let llmOutput = data.choices[0].message.content;
+		let llmOutput = response.choices[0].message.content;
 
 		const jsonMatch = llmOutput.match(/\[[\s\S]*\]/);
 		if (!jsonMatch) {

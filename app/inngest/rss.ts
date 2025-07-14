@@ -1,18 +1,10 @@
 import { inngest } from "./client";
-import { InferenceClient } from "@huggingface/inference";
+import { HfInference } from "@huggingface/inference";
 import { db } from "~/db/db.server";
 import { rssFeed } from "~/db/schema";
 import { eq } from "drizzle-orm";
 
-interface LLMResponse {
-	choices: Array<{
-		message: {
-			content: string;
-		};
-	}>;
-}
-
-const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 
 async function fetchRssContent(url: string): Promise<string> {
 	try {
@@ -46,29 +38,15 @@ ${text}
 Summary:`;
 
 	try {
-		const response = await fetch(
-			"https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1/v1/chat/completions",
-			{
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					messages: [{ role: "user", content: prompt }],
-					max_tokens: 500,
-					temperature: 0.1,
-				}),
-			}
-		);
+		const response = await hf.chatCompletion({
+			model: "meta-llama/Llama-3.1-8B-Instruct",
+			messages: [{ role: "user", content: prompt }],
+			max_tokens: 500,
+			temperature: 0.1,
+			provider: "auto",
+		});
 
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`API error: ${response.status}: ${errorText}`);
-		}
-
-		const data: LLMResponse = await response.json();
-		return data.choices[0].message.content.trim();
+		return response.choices[0].message.content.trim();
 	} catch (error) {
 		console.error("Error during LLM summarization:", error);
 		return null;

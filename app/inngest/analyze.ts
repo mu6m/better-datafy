@@ -1,6 +1,6 @@
 import { inngest } from "./client";
 import { Pinecone } from "@pinecone-database/pinecone";
-import { InferenceClient } from "@huggingface/inference";
+import { HfInference } from "@huggingface/inference";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { db } from "~/db/db.server";
 import { analysis } from "~/db/schema";
@@ -11,16 +11,8 @@ interface ContentItem {
 	text: string;
 }
 
-interface MistralResponse {
-	choices: Array<{
-		message: {
-			content: string;
-		};
-	}>;
-}
-
 const pinecone = new Pinecone();
-const hf = new InferenceClient(process.env.HUGGINGFACE_API_KEY);
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 const indexName = "datafy";
 
 const embeddingModel = "BAAI/bge-large-en-v1.5";
@@ -136,27 +128,23 @@ async function generateAnswer(question: string, contexts: string[]) {
 	const contextText = contexts.join("\n\n---\n\n");
 	const prompt = `Context:\n${contextText}\n\nQuestion: ${question}\n\nAnswer:`;
 
-	const response = await fetch(
-		"https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1/v1/chat/completions",
-		{
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				messages: [{ role: "user", content: prompt }],
-				max_tokens: 500,
-			}),
-		}
-	);
+	try {
+		const response = await hf.chatCompletion({
+			model: "meta-llama/Llama-3.1-8B-Instruct",
+			messages: [{ role: "user", content: prompt }],
+			max_tokens: 500,
+			temperature: 0.7,
+			provider: "auto",
+		});
 
-	if (!response.ok) {
-		throw new Error(`API error: ${response.statusText}`);
+		return response.choices[0].message.content;
+	} catch (error) {
+		throw new Error(
+			`AI generation failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`
+		);
 	}
-
-	const data: MistralResponse = await response.json();
-	return data.choices[0].message.content;
 }
 
 export const ragProcess = inngest.createFunction(
@@ -227,10 +215,12 @@ export const ragQuery = inngest.createFunction(
 		const answer = await step.run("generate-answer", () =>
 			generateAnswer(question, contexts)
 		);
+
 		await db
 			.update(analysis)
 			.set({ answer })
 			.where(eq(analysis.id, analysisId));
+
 		return { status: "finished", question, answer };
 	}
 );
