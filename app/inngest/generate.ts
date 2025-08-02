@@ -111,7 +111,7 @@ async function generateAITabularData(
 			model: "meta-llama/Llama-3.1-8B-Instruct",
 			messages: [{ role: "user", content: prompt }],
 			max_tokens: 1_000_000, // Adjust tokens based on expected output
-			temperature: 0.8, // Lower temperature for more consistent JSON
+			temperature: 2, // Lower temperature for more consistent JSON
 			provider: "auto",
 		});
 
