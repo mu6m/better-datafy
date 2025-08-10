@@ -33,11 +33,11 @@ export default function Dashboard() {
 	const location = useLocation();
 
 	const navigation = [
-		{ name: "Datasets", href: "/dashboard/", icon: File },
-		{ name: "Generate", href: "/dashboard/generate", icon: WashingMachine },
+		{ name: "Generate", href: "/dashboard/", icon: WashingMachine },
 		{ name: "Analyze", href: "/dashboard/analyze", icon: BarChart3 },
 		{ name: "Scrape", href: "/dashboard/scrape", icon: Pickaxe },
 		{ name: "Rss Feed AI", href: "/dashboard/rss", icon: Rss },
+		// { name: "Datasets", href: "/dashboard/datasets", icon: File },
 		// { name: "Stock LLM", href: "/dashboard/stockllm", icon: BarChart2 },
 		// { name: "Yolo Training", href: "/dashboard/yolo", icon: Video },
 		// {

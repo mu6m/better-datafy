@@ -73,7 +73,7 @@ function createPrompt(commands: string[], numItems: number): string {
 	return `
 Your task is to generate a JSON array of arrays, representing tabular data, based on a user's request.
 
-User Request: Generate ${numItems} rows of data with the following columns:
+User Request: Generate ${numItems} rows of randomly generated data with the following columns:
 ${columnDescriptions}
 
 CRITICAL INSTRUCTIONS:
@@ -82,7 +82,7 @@ CRITICAL INSTRUCTIONS:
 3. Values must be properly quoted strings or numbers
 4. No trailing commas
 5. Ensure all strings are properly closed with quotes
-6. Generate realistic, varied random data
+6. Generate varied random data
 
 For example:
 - If the request is for 3 items with columns "City", the output should be like this:
