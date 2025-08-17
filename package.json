@@ -15,9 +15,14 @@
     "@huggingface/inference": "^4.1.0",
     "@inngest/sdk": "jsr:^3.39.2",
     "@pinecone-database/pinecone": "^6.1.1",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-label": "^2.1.7",
+    "@radix-ui/react-slot": "^1.2.3",
     "@remix-run/node": "^2.16.8",
     "@remix-run/react": "^2.16.8",
     "@remix-run/serve": "^2.16.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "dotenv": "^16.5.0",
     "isbot": "^4.1.0",
     "langchain": "^0.3.29",
@@ -25,6 +30,8 @@
     "pg": "^8.16.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "tailwind-merge": "^3.3.1",
+    "tailwindcss-animate": "^1.0.7",
     "zod": "^3.25.67"
   },
   "devDependencies": {
