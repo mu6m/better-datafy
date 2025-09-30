@@ -6,145 +6,109 @@ import { db } from "~/db/db.server";
 import { analysis } from "~/db/schema";
 import { eq } from "drizzle-orm";
 
-interface ContentItem {
-	type: "link" | "text";
-	text: string;
-}
-
 const pinecone = new Pinecone();
 const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
-const indexName = "datafy";
 
-const embeddingModel = "BAAI/bge-large-en-v1.5";
-const embeddingDimension = 1024;
+const PINECONE_INDEX = "datafy";
+const EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5";
 
 async function fetchUrlContent(url: string): Promise<string> {
 	try {
-		const fullUrl = url.startsWith("http") ? url : `https://${url}`;
-		const response = await fetch(fullUrl);
-		if (!response.ok) {
-			return `Failed to fetch ${fullUrl}`;
-		}
+		const response = await fetch(
+			url.startsWith("http") ? url : `https://${url}`
+		);
+		if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
 		const html = await response.text();
 		return html
-			.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-			.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
-			.replace(/<[^>]*>/g, " ")
+			.replace(
+				/<style[^>]*>[\s\S]*?<\/style>|<script[^>]*>[\s\S]*?<\/script>|<[^>]*>/gi,
+				" "
+			)
 			.replace(/\s+/g, " ")
 			.trim();
 	} catch (error) {
-		return `Error fetching content from ${url} please note this when the user asks you anything about it`;
+		console.error(`Error fetching ${url}:`, error);
+		return `Failed to fetch content from ${url}.`;
 	}
 }
 
-async function initializeIndex() {
-	const existingIndexes = await pinecone.listIndexes();
-	if (!existingIndexes.indexes?.some((index) => index.name === indexName)) {
-		await pinecone.createIndex({
-			name: indexName,
-			dimension: embeddingDimension,
-			metric: "cosine",
-			spec: {
-				serverless: {
-					cloud: "aws",
-					region: "us-east-1",
-				},
-			},
-			waitUntilReady: true,
-		});
-	}
-}
-
-async function chunkText(text: string): Promise<string[]> {
+async function prepareAndEmbedContent(analysisId: string, sources: string[]) {
+	const index = pinecone.index(PINECONE_INDEX).namespace(analysisId);
 	const splitter = new RecursiveCharacterTextSplitter({
 		chunkSize: 1000,
 		chunkOverlap: 100,
 	});
 
-	const chunks = await splitter.splitText(text);
-	return chunks;
-}
+	const resolvedSources = await Promise.all(
+		sources.map((src) => (src.startsWith("http") ? fetchUrlContent(src) : src))
+	);
 
-async function uploadContent(analysisId: string, textSources: string[]) {
-	await initializeIndex();
-	const index = pinecone.index(indexName).namespace(analysisId);
-	const batchSize = 100;
+	const allChunks = (
+		await Promise.all(
+			resolvedSources.map((text, sourceIndex) =>
+				splitter
+					.splitText(text)
+					.then((chunks) => chunks.map((content) => ({ content, sourceIndex })))
+			)
+		)
+	).flat();
 
-	for (let [sourceIndex, textContent] of textSources.entries()) {
-		if (
-			textContent.startsWith("http://") ||
-			textContent.startsWith("https://")
-		) {
-			textContent = await fetchUrlContent(textContent);
-		}
-		const contentChunks = await chunkText(textContent);
+	if (allChunks.length === 0) return;
 
-		const vectors = [];
-		for (const [i, chunk] of contentChunks.entries()) {
-			const embedding = await hf.featureExtraction({
-				model: embeddingModel,
-				inputs: chunk,
-			});
+	const embeddings = (await hf.featureExtraction({
+		model: EMBEDDING_MODEL,
+		inputs: allChunks.map((chunk) => chunk.content),
+	})) as number[][];
 
-			vectors.push({
-				id: `content-${analysisId}-source${sourceIndex}-${Date.now()}-${i}`,
-				values: embedding as number[],
-				metadata: { content: chunk, sourceIndex },
-			});
+	const vectors = allChunks.map(({ content, sourceIndex }, i) => ({
+		id: `chunk-${sourceIndex}-${i}`,
+		values: embeddings[i],
+		metadata: { content, sourceIndex },
+	}));
 
-			if (vectors.length === batchSize) {
-				await index.upsert(vectors);
-				vectors.length = 0;
-			}
-		}
-
-		if (vectors.length > 0) {
-			await index.upsert(vectors);
-		}
+	for (let i = 0; i < vectors.length; i += 100) {
+		await index.upsert(vectors.slice(i, i + 100));
 	}
-	return { success: true, count: textSources.length };
 }
 
-async function queryContent(analysisId: string, question: string) {
-	const index = pinecone.index(indexName).namespace(analysisId);
-
+async function queryEmbeddings(
+	analysisId: string,
+	question: string
+): Promise<string[]> {
+	const index = pinecone.index(PINECONE_INDEX).namespace(analysisId);
 	const questionEmbedding = await hf.featureExtraction({
-		model: embeddingModel,
+		model: EMBEDDING_MODEL,
 		inputs: question,
 	});
 
-	const queryResponse = await index.query({
+	const { matches } = await index.query({
 		vector: questionEmbedding as number[],
 		topK: 3,
 		includeMetadata: true,
 	});
 
-	return queryResponse.matches
+	return matches
 		.map((match) => (match.metadata?.content as string) || "")
 		.filter(Boolean);
 }
 
-async function generateAnswer(question: string, contexts: string[]) {
-	const contextText = contexts.join("\n\n---\n\n");
-	const prompt = `Context:\n${contextText}\n\nQuestion: ${question}\n\nAnswer:`;
+async function generateAnswer(
+	question: string,
+	contexts: string[]
+): Promise<string> {
+	const prompt = `Using the following context, answer the question.\n\nContext:\n${contexts.join(
+		"\n---\n"
+	)}\n\nQuestion: ${question}\n\nAnswer:`;
 
-	try {
-		const response = await hf.chatCompletion({
-			model: "meta-llama/Llama-3.1-8B-Instruct",
-			messages: [{ role: "user", content: prompt }],
-			max_tokens: 500,
-			temperature: 0.7,
-			provider: "auto",
-		});
+	const response = await hf.chatCompletion({
+		model: "meta-llama/Llama-3.1-8B-Instruct",
 
-		return response.choices[0].message.content;
-	} catch (error) {
-		throw new Error(
-			`AI generation failed: ${
-				error instanceof Error ? error.message : String(error)
-			}`
-		);
-	}
+		messages: [{ role: "user", content: prompt }],
+
+		max_tokens: 500,
+	});
+
+	return response.choices[0].message.content;
 }
 
 export const ragProcess = inngest.createFunction(
@@ -152,51 +116,31 @@ export const ragProcess = inngest.createFunction(
 	{ event: "ai/rag.process" },
 	async ({ event, step }) => {
 		const { analysisId } = event.data;
+		const setStatus = (status: "running" | "finished" | "error") =>
+			db.update(analysis).set({ status }).where(eq(analysis.id, analysisId));
 
 		try {
-			await step.run("update-status-running", async () => {
-				await db
-					.update(analysis)
-					.set({ status: "running" })
-					.where(eq(analysis.id, analysisId));
-			});
-
-			const analysisData = await step.run("fetch-analysis", async () => {
-				const result = await db
+			await step.run("set-status-running", () => setStatus("running"));
+			const record = await step.run("fetch-analysis-record", async () => {
+				const [data] = await db
 					.select()
 					.from(analysis)
-					.where(eq(analysis.id, analysisId))
-					.limit(1);
-
-				if (result.length === 0) {
-					throw new Error("Analysis not found");
-				}
-
-				return result[0];
-			});
-
-			const textSources = analysisData.data?.data || [];
-
-			await step.run("upload-content", () =>
-				uploadContent(analysisId, textSources)
-			);
-
-			await step.run("update-status-finished", async () => {
-				await db
-					.update(analysis)
-					.set({ status: "finished" })
 					.where(eq(analysis.id, analysisId));
+				if (!data) throw new Error(`Analysis record ${analysisId} not found.`);
+				return data;
 			});
 
+			const sources = (record.data?.data as string[]) || [];
+			if (sources.length === 0)
+				throw new Error("No text sources found to process.");
+
+			await step.run("prepare-and-embed-content", () =>
+				prepareAndEmbedContent(analysisId, sources)
+			);
+			await step.run("set-status-finished", () => setStatus("finished"));
 			return { status: "finished", analysisId };
 		} catch (error) {
-			await step.run("update-status-error", async () => {
-				await db
-					.update(analysis)
-					.set({ status: "error" })
-					.where(eq(analysis.id, analysisId));
-			});
-
+			await step.run("set-status-error", () => setStatus("error"));
 			throw error;
 		}
 	}
@@ -208,19 +152,18 @@ export const ragQuery = inngest.createFunction(
 	async ({ event, step }) => {
 		const { analysisId, question } = event.data;
 
-		const contexts = await step.run("query-content", () =>
-			queryContent(analysisId, question)
+		const contexts = await step.run("query-content-embeddings", () =>
+			queryEmbeddings(analysisId, question)
 		);
 
-		const answer = await step.run("generate-answer", () =>
+		const answer = await step.run("generate-final-answer", () =>
 			generateAnswer(question, contexts)
 		);
 
-		await db
-			.update(analysis)
-			.set({ answer })
-			.where(eq(analysis.id, analysisId));
+		await step.run("save-answer-to-db", () =>
+			db.update(analysis).set({ answer }).where(eq(analysis.id, analysisId))
+		);
 
-		return { status: "finished", question, answer };
+		return { status: "answered", question, answer };
 	}
 );
