@@ -1,89 +1,85 @@
+// app/routes/_dash.dashboard.datasets.tsx
+
 import { Download } from "lucide-react";
 import { useLoaderData } from "@remix-run/react";
 import { json, type LoaderFunctionArgs } from "@remix-run/node";
 import { db } from "~/db/db.server";
 import { datasets } from "~/db/schema";
+import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "~/components/ui/table";
+import { Button } from "~/components/ui/button";
 
 export const loader = async (args: LoaderFunctionArgs) => {
 	const data = await db.select().from(datasets).orderBy(datasets.updatedAt);
-
-	return json({
-		data,
-	});
+	return json({ data });
 };
 
 export default function DataDashboard() {
 	const { data } = useLoaderData<typeof loader>();
 
-	return (
-		<div className="max-w-4xl mx-auto p-6">
-			<div className="bg-white rounded-lg shadow-sm border border-gray-200">
-				<div className="flex items-center justify-between p-6 border-b border-gray-200">
-					<h2 className="text-xl font-semibold text-gray-900">Datasets</h2>
-				</div>
+	const handleDownload = (dataset: (typeof data)[number]) => {
+		const link = document.createElement("a");
+		link.href = dataset.link as string;
+		link.target = "_blank";
+		link.download = `${dataset.name}.json`;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+	};
 
-				<div className="overflow-x-auto">
-					<table className="w-full">
-						<thead className="bg-gray-50">
-							<tr>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Name
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Updated At
-								</th>
-								<th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-									Download
-								</th>
-							</tr>
-						</thead>
-						<tbody className="bg-white divide-y divide-gray-200">
-							{data.length === 0 ? (
-								<tr>
-									<td
-										colSpan={4}
-										className="px-6 py-12 text-center text-gray-500"
-									>
-										No datasets found.
-									</td>
-								</tr>
-							) : (
-								data.map((dataset) => (
-									<tr key={dataset.id} className="hover:bg-gray-50">
-										<td className="px-6 py-4 whitespace-nowrap">
-											<div className="text-sm font-medium text-gray-900">
-												{dataset.name || `Dataset ${dataset.id.slice(0, 8)}`}
-											</div>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap">
-											<div className="text-sm font-medium text-gray-900">
-												{dataset.updatedAt}
-											</div>
-										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-											<button
-												onClick={() => {
-													const link = document.createElement("a");
-													link.href = dataset.link;
-													link.target = "_blank";
-													link.download = `${dataset.name}.json`;
-													document.body.appendChild(link);
-													link.click();
-													document.body.removeChild(link);
-												}}
-												className="inline-flex items-center text-blue-600 hover:text-blue-800 disabled:text-gray-400"
-											>
-												<Download className="w-4 h-4 mr-1" />
-												JSON
-											</button>
-										</td>
-									</tr>
-								))
-							)}
-						</tbody>
-					</table>
-				</div>
-			</div>
-		</div>
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle>Datasets</CardTitle>
+			</CardHeader>
+			<CardContent>
+				<Table>
+					<TableHeader>
+						<TableRow>
+							<TableHead>Name</TableHead>
+							<TableHead>Updated At</TableHead>
+							<TableHead>Download</TableHead>
+						</TableRow>
+					</TableHeader>
+					<TableBody>
+						{data.length === 0 ? (
+							<TableRow>
+								<TableCell colSpan={3} className="h-24 text-center">
+									No datasets found.
+								</TableCell>
+							</TableRow>
+						) : (
+							data.map((dataset) => (
+								<TableRow key={dataset.id}>
+									<TableCell className="font-medium">
+										{dataset.name || `Dataset ${dataset.id.slice(0, 8)}`}
+									</TableCell>
+									<TableCell>
+										{new Date(dataset.updatedAt!).toLocaleString()}
+									</TableCell>
+									<TableCell>
+										<Button
+											variant="link"
+											size="sm"
+											onClick={() => handleDownload(dataset)}
+										>
+											<Download className="mr-2 h-4 w-4" />
+											JSON
+										</Button>
+									</TableCell>
+								</TableRow>
+							))
+						)}
+					</TableBody>
+				</Table>
+			</CardContent>
+		</Card>
 	);
 }
