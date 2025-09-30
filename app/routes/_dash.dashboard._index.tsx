@@ -184,7 +184,7 @@ export async function action(args: ActionFunctionArgs) {
 				},
 			});
 
-			return redirect("/dashboard/generate");
+			return redirect("/dashboard/");
 		} catch (error) {
 			console.error("Failed to create generation:", error);
 			return json(
